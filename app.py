@@ -42,10 +42,12 @@ except Exception:
 
 
 def get_viewer_email() -> str | None:
-    # Prueba primero la API moderna (st.user), y si no existe o no trae
-    # email, cae a la API antigua (st.experimental_user) — cubre distintas
-    # versiones de Streamlit que puede tener instaladas Community Cloud.
-    for accessor in ("user", "experimental_user"):
+    # API moderna (st.user); solo si no existe en absoluto se cae a la
+    # antigua st.experimental_user (Streamlit muy viejo) — se evita tocarla
+    # cuando st.user ya está disponible, porque accederla dispara un aviso
+    # de deprecación aunque no se use el resultado.
+    accessors = ("user",) if hasattr(st, "user") else ("experimental_user",)
+    for accessor in accessors:
         try:
             u = getattr(st, accessor, None)
             if u is None:
@@ -140,7 +142,7 @@ def render_design_panel(design):
              "Réplicas que debe generar": design.replicas_por_grupo}
             for i, g in enumerate(design.grupos)
         ]
-        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Grupos totales", design.n_grupos)
         c2.metric("Réplicas totales / nivel", design.n_replicas_total)
@@ -176,30 +178,74 @@ page = st.sidebar.radio(
 st.sidebar.divider()
 st.sidebar.markdown("### ☁️ Guardado compartido")
 try:
-    from core.persistence import drive_configured, save_project_to_drive, load_project_from_drive
+    from core.persistence import (
+        drive_configured, save_project_to_drive, load_project_from_drive,
+        list_projects_in_drive, sanitize_project_filename, DEFAULT_FILENAME,
+    )
     if drive_configured():
         if "last_saved" not in st.session_state:
             st.session_state.last_saved = None
-        if st.sidebar.button("💾 Guardar en Drive", width='stretch'):
-            try:
-                save_project_to_drive(project)
-                st.session_state.last_saved = "ahora mismo"
-                st.sidebar.success("Guardado.")
-            except Exception as e:
-                st.sidebar.error(f"No se pudo guardar: {e}")
-        if st.sidebar.button("📥 Cargar último guardado", width='stretch'):
-            try:
-                loaded, modified = load_project_from_drive()
-                if loaded is None:
-                    st.sidebar.warning("Todavía no hay nada guardado en Drive.")
-                else:
-                    st.session_state.project = loaded
-                    st.sidebar.success(f"Cargado (última modificación: {modified}).")
+        if "project_filename" not in st.session_state:
+            st.session_state.project_filename = None  # aún no se ha guardado/cargado ningún proyecto
+
+        st.sidebar.caption(
+            "Cada verificación (ensayo/técnica) es un proyecto independiente — así varios analistas "
+            "pueden trabajar en verificaciones distintas sin sobrescribirse entre sí."
+        )
+        try:
+            proyectos = list_projects_in_drive()
+        except Exception as e:
+            proyectos = []
+            st.sidebar.error(f"No se pudo listar proyectos: {e}")
+
+        opciones = ["➕ Proyecto nuevo"] + [p["nombre"] for p in proyectos]
+        sel = st.sidebar.selectbox("Proyecto", opciones, key="project_selector")
+
+        if sel == "➕ Proyecto nuevo":
+            nuevo_nombre = st.sidebar.text_input(
+                "Nombre del nuevo proyecto (p.ej. 'THM Agua Cromatografia')", key="new_project_name"
+            )
+            if st.sidebar.button("📥 Crear / cargar este proyecto", width='stretch') and nuevo_nombre:
+                filename = sanitize_project_filename(nuevo_nombre)
+                try:
+                    loaded, modified = load_project_from_drive(filename)
+                    if loaded is not None:
+                        st.session_state.project = loaded
+                        st.sidebar.success(f"Ya existía — cargado (última modificación: {modified}).")
+                    else:
+                        st.sidebar.success("Proyecto nuevo listo (se creará al guardar).")
+                    st.session_state.project_filename = filename
                     st.rerun()
-            except Exception as e:
-                st.sidebar.error(f"No se pudo cargar: {e}")
-        if st.session_state.last_saved:
-            st.sidebar.caption(f"Último guardado: {st.session_state.last_saved}")
+                except Exception as e:
+                    st.sidebar.error(f"No se pudo crear/cargar: {e}")
+        else:
+            filename = sanitize_project_filename(sel)
+            if st.sidebar.button("📥 Cargar este proyecto", width='stretch'):
+                try:
+                    loaded, modified = load_project_from_drive(filename)
+                    if loaded is None:
+                        st.sidebar.warning("No se encontró el archivo (puede haber sido eliminado).")
+                    else:
+                        st.session_state.project = loaded
+                        st.session_state.project_filename = filename
+                        st.sidebar.success(f"Cargado (última modificación: {modified}).")
+                        st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"No se pudo cargar: {e}")
+
+        if st.session_state.project_filename:
+            st.sidebar.caption(f"Proyecto activo: **{st.session_state.project_filename[:-5]}**")
+            if st.sidebar.button("💾 Guardar en Drive", width='stretch', type="primary"):
+                try:
+                    save_project_to_drive(project, st.session_state.project_filename)
+                    st.session_state.last_saved = "ahora mismo"
+                    st.sidebar.success("Guardado.")
+                except Exception as e:
+                    st.sidebar.error(f"No se pudo guardar: {e}")
+            if st.session_state.last_saved:
+                st.sidebar.caption(f"Último guardado: {st.session_state.last_saved}")
+        else:
+            st.sidebar.info("Elige o crea un proyecto arriba antes de guardar.")
     else:
         st.sidebar.caption(
             "No configurado todavía (falta agregar la cuenta de servicio en Secrets). "
@@ -422,51 +468,102 @@ elif page.startswith("2"):
                     }
                     for a in cert.analitos
                 ]
-                st.dataframe(pd.DataFrame(rows), width='stretch')
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
     with tab_equip:
         st.caption(
             "Registro de material volumétrico (pipetas, balones aforados, etc.) — equivalente a tu "
             "'Hoja M'. Regístralo UNA vez por instrumento; luego lo seleccionas por nombre al armar la "
-            "dilución de cada compuesto, sin digitar los valores de nuevo."
+            "dilución de cada compuesto, sin digitar los valores de nuevo. La capacidad, el certificado "
+            "y la resolución se registran en la unidad que tengas en el certificado (mL o µL); la "
+            "repetibilidad se puede calcular a partir de las réplicas crudas (como en la Hoja M) más "
+            "abajo, tenga o no el instrumento certificado de calibración."
         )
         df_eq_default = pd.DataFrame(
             [{"nombre": e.nombre, "tipo": e.tipo, "clase": e.clase, "capacidad_nominal": e.capacidad_nominal,
-              "codigo_interno": e.codigo_interno, "tiene_certificado_calibracion": e.tiene_certificado_calibracion,
+              "unidad_capacidad": e.unidad_capacidad, "codigo_interno": e.codigo_interno,
+              "tiene_certificado_calibracion": e.tiene_certificado_calibracion,
               "incertidumbre_certificado": e.incertidumbre_certificado, "k_certificado": e.k_certificado,
-              "fecha_calibracion": e.fecha_calibracion, "tolerancia_fabricante": e.tolerancia_fabricante,
-              "sd_repetibilidad": e.sd_repetibilidad, "n_repetibilidad": e.n_repetibilidad}
+              "resolucion": e.resolucion, "fecha_calibracion": e.fecha_calibracion,
+              "tolerancia_fabricante": e.tolerancia_fabricante}
              for e in project.equipment] or
             [{"nombre": "", "tipo": "Pipeta", "clase": "A", "capacidad_nominal": 0.0,
-              "codigo_interno": "", "tiene_certificado_calibracion": False,
-              "incertidumbre_certificado": None, "k_certificado": 2.0,
-              "fecha_calibracion": "", "tolerancia_fabricante": None,
-              "sd_repetibilidad": None, "n_repetibilidad": 10}]
+              "unidad_capacidad": "mL", "codigo_interno": "", "tiene_certificado_calibracion": False,
+              "incertidumbre_certificado": None, "k_certificado": 2.0, "resolucion": None,
+              "fecha_calibracion": "", "tolerancia_fabricante": None}]
         )
         df_eq = st.data_editor(
-            df_eq_default, num_rows="dynamic", key="equipment_editor", width='stretch',
+            df_eq_default, num_rows="dynamic", key="equipment_editor", use_container_width=True,
             column_config={
                 "tipo": st.column_config.SelectboxColumn(options=["Pipeta", "Balón aforado", "Probeta", "Jeringa", "Otro"]),
                 "clase": st.column_config.SelectboxColumn(options=["A", "B", "A/S", "N/A"]),
+                "unidad_capacidad": st.column_config.SelectboxColumn("Unidad", options=["mL", "µL"]),
+                "capacidad_nominal": st.column_config.NumberColumn("Capacidad", format="%.4f"),
+                "incertidumbre_certificado": st.column_config.NumberColumn("U certificado", format="%.4f"),
+                "resolucion": st.column_config.NumberColumn("Resolución", format="%.4f", help="Última cifra legible del visor/graduación, en la misma unidad que la capacidad."),
+                "tolerancia_fabricante": st.column_config.NumberColumn("Tolerancia (mL)", format="%.4f"),
             },
         )
         if st.button("💾 Guardar registro de material volumétrico", type="primary"):
-            project.equipment = [
-                VolumetricEquipmentRecord(
+            existentes = {e.nombre: e for e in project.equipment}
+            nuevos = []
+            for r in df_eq.to_dict("records"):
+                if not r.get("nombre"):
+                    continue
+                previo = existentes.get(r["nombre"])
+                nuevos.append(VolumetricEquipmentRecord(
                     nombre=r["nombre"], tipo=r.get("tipo") or "Pipeta", clase=r.get("clase") or "A",
                     capacidad_nominal=to_float(r.get("capacidad_nominal")),
+                    unidad_capacidad=r.get("unidad_capacidad") or "mL",
                     codigo_interno=r.get("codigo_interno") or "",
                     tiene_certificado_calibracion=bool(r.get("tiene_certificado_calibracion")),
                     incertidumbre_certificado=to_float(r.get("incertidumbre_certificado")) or None,
                     k_certificado=to_float(r.get("k_certificado")) or 2.0,
+                    resolucion=to_float(r.get("resolucion")) or None,
                     fecha_calibracion=r.get("fecha_calibracion") or "",
                     tolerancia_fabricante=to_float(r.get("tolerancia_fabricante")) or None,
-                    sd_repetibilidad=to_float(r.get("sd_repetibilidad")) or None,
-                    n_repetibilidad=int(r.get("n_repetibilidad") or 10),
-                )
-                for r in df_eq.to_dict("records") if r.get("nombre")
-            ]
+                    # las réplicas crudas se editan aparte (abajo) — se conservan si el
+                    # instrumento ya existía, para no perderlas al guardar esta tabla
+                    repeticiones=list(previo.repeticiones) if previo else [],
+                    sd_repetibilidad=previo.sd_repetibilidad if previo else None,
+                    n_repetibilidad=previo.n_repetibilidad if previo else 10,
+                ))
+            project.equipment = nuevos
             st.success(f"Guardado ({len(project.equipment)} instrumentos).")
+            st.rerun()
+
+        if project.equipment:
+            st.markdown("#### 🔁 Verificación de repetibilidad (réplicas crudas, como la Hoja M)")
+            st.caption(
+                "Registra aquí las réplicas de llenado/vaciado de cada instrumento para calcular su "
+                "SD y n de repetibilidad dentro de la app — aplica igual si el instrumento NO tiene "
+                "certificado de calibración (es entonces la única verificación disponible de ese "
+                "material: una verificación intermedia por repetibilidad, no una calibración)."
+            )
+            for i, eq in enumerate(project.equipment):
+                with st.expander(f"{eq.nombre} — {len(eq.repeticiones)} réplica(s) registrada(s)"):
+                    df_rep_default = pd.DataFrame(
+                        {"Valor (repetición)": eq.repeticiones or [0.0]}
+                    )
+                    df_rep_edit = numeric_data_editor(
+                        df_rep_default, ["Valor (repetición)"], num_rows="dynamic",
+                        key=f"repeticiones_{eq.nombre}",
+                    )
+                    if st.button("💾 Guardar réplicas", key=f"guardar_rep_{eq.nombre}"):
+                        valores = [v for v in df_rep_edit["Valor (repetición)"].tolist() if v]
+                        project.equipment[i].repeticiones = valores
+                        st.success(f"{len(valores)} réplica(s) guardadas.")
+                        st.rerun()
+                    if eq.repeticiones:
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Promedio", f"{eq.promedio_repeticiones:.5f} {eq.unidad_capacidad}")
+                        c2.metric("SD", f"{eq.sd_repeticiones:.5f} {eq.unidad_capacidad}" if eq.sd_repeticiones is not None else "-")
+                        c3.metric("n", eq.n_efectivo)
+                    elif not eq.tiene_certificado_calibracion:
+                        st.warning(
+                            "Este instrumento no tiene certificado de calibración ni réplicas de "
+                            "repetibilidad registradas — no hay ninguna verificación de su desempeño."
+                        )
             st.rerun()
 
 
@@ -523,7 +620,7 @@ elif page.startswith("3"):
         df_wide = pd.DataFrame(wide)
         df_edit = numeric_data_editor(df_wide, list(wide.keys()),
                                        key=f"curves_wide_{compound.nombre}", num_rows="fixed",
-                                       width='stretch')
+                                       use_container_width=True)
         levels_col = df_edit["nivel_nominal"].tolist()
         for i, curve in enumerate(compound.calibration_curves):
             curve.levels_nominal = levels_col
@@ -576,7 +673,7 @@ elif page.startswith("3"):
                         lambda v: "background-color:#FFC7CE" if isinstance(v, (int, float)) and abs(v) > err_max else "",
                         subset=["% Error"],
                     ),
-                    width='stretch',
+                    use_container_width=True,
                 )
                 puntos_excedidos = [
                     (d, a, n, e) for d, a, n, e in zip(cal.dias, cal.analistas, cal.puntos_x, cal.error_percent)
@@ -646,7 +743,7 @@ elif page.startswith("3"):
         }
         existing_labels = [r.label for r in compound.replicate_levels if r.label not in ("LC", "LS")]
 
-        with st.form(f"addlvl_form_{compound.nombre}"):
+        with st.form(f"addlvl_form_{compound.nombre}", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
                 new_label = st.text_input("Nombre (p.ej. 'Muestra SUP', 'LFM SUP')")
@@ -660,15 +757,20 @@ elif page.startswith("3"):
                 new_ref_dup = st.selectbox("Referencia para RPD (para DM/LFMD)", ref_options)
             st.caption(TIPO_AYUDA[new_tipo])
             if st.form_submit_button("➕ Agregar", type="primary") and new_label:
-                compound.replicate_levels.append(
-                    ReplicateLevel(
-                        label=new_label, nominal=new_nominal, tipo=new_tipo,
-                        referencia_nativa=None if new_ref_nativa == "(ninguna)" else new_ref_nativa,
-                        referencia_duplicado=None if new_ref_dup == "(ninguna)" else new_ref_dup,
-                        values=[[0.0] * project.design.replicas_por_grupo for _ in range(project.design.n_grupos)],
+                nombres_existentes = [r.label for r in compound.replicate_levels]
+                if new_label in nombres_existentes:
+                    st.error(f"Ya existe una muestra/nivel llamada '{new_label}' para este compuesto. "
+                             "Usa un nombre distinto (p.ej. agrega el número de muestra o la matriz).")
+                else:
+                    compound.replicate_levels.append(
+                        ReplicateLevel(
+                            label=new_label, nominal=new_nominal, tipo=new_tipo,
+                            referencia_nativa=None if new_ref_nativa == "(ninguna)" else new_ref_nativa,
+                            referencia_duplicado=None if new_ref_dup == "(ninguna)" else new_ref_dup,
+                            values=[[0.0] * project.design.replicas_por_grupo for _ in range(project.design.n_grupos)],
+                        )
                     )
-                )
-                st.rerun()
+                    st.rerun()
 
         for lvl in compound.replicate_levels:
             if lvl.label in ("LC", "LS"):
@@ -711,19 +813,21 @@ elif page.startswith("3"):
             if sel_eq != "(digitar manualmente)":
                 eq = project.get_equipment(sel_eq)
                 st.caption(
-                    f"{eq.tipo} clase {eq.clase}, {eq.capacidad_nominal} mL  |  "
-                    + (f"U cert. ±{eq.incertidumbre_certificado} mL (k={eq.k_certificado})"
+                    f"{eq.tipo} clase {eq.clase}, {eq.capacidad_nominal} {eq.unidad_capacidad}  |  "
+                    + (f"U cert. ±{eq.incertidumbre_certificado} {eq.unidad_capacidad} (k={eq.k_certificado})"
                        if eq.tiene_certificado_calibracion else
                        f"tolerancia ±{eq.tolerancia_fabricante} mL")
-                    + (f"  |  SD repetibilidad {eq.sd_repetibilidad} mL" if eq.sd_repetibilidad else "")
+                    + (f"  |  Resolución {eq.resolucion} {eq.unidad_capacidad}" if eq.resolucion else "")
+                    + (f"  |  SD repetibilidad {eq.sd_repeticiones or eq.sd_repetibilidad:.5f} {eq.unidad_capacidad} (n={eq.n_efectivo})"
+                       if eq.sd_efectiva_ml else "  |  ⚠️ sin repetibilidad registrada")
                 )
                 return VolumetricStep(
                     descripcion=descripcion, volumen_nominal=vol or 1.0, instrumento=eq.nombre,
                     equipment_record_id=eq.nombre,
                     tiene_certificado_calibracion=eq.tiene_certificado_calibracion,
-                    incertidumbre_certificado=eq.incertidumbre_certificado, k_certificado=eq.k_certificado,
-                    tolerancia_fabricante=eq.tolerancia_fabricante, sd_repetibilidad=eq.sd_repetibilidad,
-                    n_repetibilidad=eq.n_repetibilidad,
+                    incertidumbre_certificado=eq.incertidumbre_certificado_ml, k_certificado=eq.k_certificado,
+                    tolerancia_fabricante=eq.tolerancia_fabricante_ml, resolucion=eq.resolucion_ml,
+                    sd_repetibilidad=eq.sd_efectiva_ml, n_repetibilidad=eq.n_efectivo,
                 )
             c3, c4 = st.columns(2)
             with c3:
@@ -733,12 +837,13 @@ elif page.startswith("3"):
                 tol = None if tiene_cal else st.number_input(
                     "Tolerancia de fabricante/clase (mL, semi-intervalo)", 0.0, key=f"steptol_{key_prefix}"
                 )
+                resol = st.number_input("Resolución del instrumento (mL, opcional)", 0.0, key=f"stepresol_{key_prefix}")
             with c4:
                 sd_rep = st.number_input("SD de repetibilidad (mL, opcional)", 0.0, key=f"stepsd_{key_prefix}")
             return VolumetricStep(
                 descripcion=descripcion, volumen_nominal=vol or 1.0,
                 tiene_certificado_calibracion=tiene_cal, incertidumbre_certificado=u_cert, k_certificado=k_cert,
-                tolerancia_fabricante=tol, sd_repetibilidad=sd_rep or None,
+                tolerancia_fabricante=tol, resolucion=resol or None, sd_repetibilidad=sd_rep or None,
             )
 
         def render_standard_prep_ui(key_prefix: str, nombre_hint: str, niveles_ref: list[float]) -> StandardPreparation:
@@ -1063,7 +1168,7 @@ elif page.startswith("5"):
                 "U expandida (abs)": round(b.u_expandida, 5),
                 "U relativa (%)": round(b.u_relativa_expandida_percent, 2),
             } for b in budget_levels])
-            st.dataframe(df, width='stretch')
+            st.dataframe(df, use_container_width=True)
 
             if len(budget_levels) >= 2:
                 model = U.fit_level_dependent_model(budget_levels)
