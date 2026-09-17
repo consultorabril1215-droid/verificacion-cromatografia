@@ -173,9 +173,14 @@ class CalibrationAnalysis:
     residuales: list[float]              # y_obs - y_pred (unidades de señal)
     x_recalculada: list[float]           # concentración recalculada desde la curva
     error_percent: list[float]           # % error de la concentración recalculada vs. nominal
+    dias: list[int]                      # día de origen de cada punto (trazabilidad)
+    analistas: list[str]                 # analista de origen de cada punto (trazabilidad)
 
 
-def analyze_calibration(all_curves_levels: list[list[float]], all_curves_responses: list[list[float]], r_min: float) -> CalibrationAnalysis:
+def analyze_calibration(
+    all_curves_levels: list[list[float]], all_curves_responses: list[list[float]], r_min: float,
+    dias: list[int] | None = None, analistas: list[str] | None = None,
+) -> CalibrationAnalysis:
     """Orquesta el análisis completo de la(s) curva(s) de calibración de un
     compuesto: homogeneidad de varianzas -> linealidad de Mandel -> decide y
     ajusta el modelo (simple o ponderado) -> calcula residuales, concentración
@@ -183,9 +188,19 @@ def analyze_calibration(all_curves_levels: list[list[float]], all_curves_respons
 
     `all_curves_levels`/`all_curves_responses`: una lista por curva (p.ej. una
     por día), cada una con los niveles/respuestas de esa curva.
+    `dias`/`analistas`: opcional, un valor por CURVA (no por punto) para
+    trazabilidad — se repite automáticamente para cada punto de esa curva.
     """
     pooled_levels = [x for curve in all_curves_levels for x in curve]
     pooled_responses = [y for curve in all_curves_responses for y in curve]
+    pooled_dias = [
+        (dias[i] if dias and i < len(dias) else i + 1)
+        for i, curve in enumerate(all_curves_levels) for _ in curve
+    ]
+    pooled_analistas = [
+        (analistas[i] if analistas and i < len(analistas) else "")
+        for i, curve in enumerate(all_curves_levels) for _ in curve
+    ]
 
     level_replicates: dict[float, list[float]] = {}
     for curve_levels, curve_responses in zip(all_curves_levels, all_curves_responses):
@@ -218,6 +233,7 @@ def analyze_calibration(all_curves_levels: list[list[float]], all_curves_respons
         slope=slope, intercept=intercept, r=r, r2=r2, cumple_r=cumple,
         puntos_x=pooled_levels, puntos_y=pooled_responses,
         residuales=res, x_recalculada=x_recalc, error_percent=err_pct,
+        dias=pooled_dias, analistas=pooled_analistas,
     )
 
 
@@ -364,6 +380,50 @@ def trueness_stats(values: list[float], nominal: float, alpha: float = 0.05) -> 
         ic_bajo=desc.mean - margen,
         ic_alto=desc.mean + margen,
     )
+
+
+# ---------------------------------------------------------------------------
+# Control de calidad por lote de muestras (LA-P-343/LA-P-340, Tabla 5):
+# recuperación NETA de matriz fortificada (LFM/LFMD) y RPD de duplicados
+# (DM/LFMD). Esto NO viene textualmente de la guía Eurachem (que trata la
+# verificación con estándares, no con matrices reales sin valor de
+# referencia) pero es la práctica estándar de control de calidad por lote
+# en química analítica ambiental (EPA 8000 series) y es la que ya usa el
+# laboratorio en sus procedimientos [CRITERIO DEL PROCEDIMIENTO INTERNO].
+# ---------------------------------------------------------------------------
+@dataclass
+class NetRecoveryResult:
+    mean_spiked: float
+    mean_native: float
+    net_recovery_percent: float
+
+
+def net_recovery_stats(spiked_values: list[float], native_values: list[float], added_amount: float) -> NetRecoveryResult:
+    """Recuperación neta de una matriz fortificada (LFM/LFMD):
+    R(%) = (media_adicionada - media_nativa) / cantidad_adicionada * 100
+    """
+    m_sp = sum(spiked_values) / len(spiked_values)
+    m_na = sum(native_values) / len(native_values) if native_values else 0.0
+    net = ((m_sp - m_na) / added_amount) * 100 if added_amount else float("nan")
+    return NetRecoveryResult(mean_spiked=m_sp, mean_native=m_na, net_recovery_percent=net)
+
+
+@dataclass
+class RPDResult:
+    mean_a: float
+    mean_b: float
+    rpd_percent: float
+
+
+def rpd_stats(values_a: list[float], values_b: list[float]) -> RPDResult:
+    """Diferencia porcentual relativa (RPD) entre dos resultados/duplicados:
+    RPD(%) = |media_a - media_b| / ((media_a + media_b)/2) * 100
+    """
+    m_a = sum(values_a) / len(values_a)
+    m_b = sum(values_b) / len(values_b)
+    denom = (m_a + m_b) / 2
+    rpd = abs(m_a - m_b) / denom * 100 if denom else float("nan")
+    return RPDResult(mean_a=m_a, mean_b=m_b, rpd_percent=rpd)
 
 
 # ---------------------------------------------------------------------------
