@@ -35,6 +35,7 @@ import math
 from dataclasses import dataclass, field
 
 from .models import VolumetricStep, StandardPreparation, Compound
+from .stats import linearity
 
 
 def combine_rss(components: list[float]) -> float:
@@ -105,7 +106,19 @@ class StandardPrepUncertainty:
     u_relativa_combinada: float
 
 
-def standard_preparation_uncertainty(prep: StandardPreparation) -> StandardPrepUncertainty:
+def standard_preparation_uncertainty_at(prep: StandardPreparation, target_concentration: float) -> StandardPrepUncertainty:
+    """Incertidumbre de preparación del estándar EN EL NIVEL de concentración
+    que corresponde (p.ej. LC o LS pueden diluirse con volúmenes distintos —
+    Tabla 2, LA-P-343/LA-P-340 — así que cada uno tiene su propia u_prep).
+    Se usa el DilutionLevel cuya concentración nominal esté más cerca de
+    `target_concentration`."""
+    if not prep.dilution_levels:
+        raise ValueError(
+            "Este estándar no tiene niveles de dilución registrados "
+            "(ve a la pestaña de preparación y define al menos un nivel: alícuota + aforo)."
+        )
+    nivel = min(prep.dilution_levels, key=lambda lv: abs(lv.concentracion_nominal - target_concentration))
+
     rm = prep.reference_material
     # Incertidumbre relativa de la concentración certificada del MRC
     if rm.tiene_certificado and rm.incertidumbre_certificado:
@@ -123,7 +136,7 @@ def standard_preparation_uncertainty(prep: StandardPreparation) -> StandardPrepU
     else:
         u_pureza = 0.0
 
-    pasos_u = [volumetric_step_uncertainty(s) for s in prep.steps]
+    pasos_u = [volumetric_step_uncertainty(nivel.alicuota), volumetric_step_uncertainty(nivel.aforo)]
     componentes = [u_mrc, u_pureza] + [p.u_relativa for p in pasos_u]
     u_combinada = combine_rss(componentes)
     return StandardPrepUncertainty(u_pureza, u_mrc, pasos_u, u_combinada)
@@ -158,6 +171,73 @@ def calibration_response_uncertainty(
     if sxx == 0:
         raise ValueError("Todos los niveles de calibración son iguales; no se puede estimar Sxx.")
     var_xpred = s2 * (1 / p_mediciones_muestra + 1 / n + ((x_pred - xbar) ** 2) / sxx)
+    return math.sqrt(var_xpred)
+
+
+def calibration_response_uncertainty_averaged_curves(
+    curves_levels: list[list[float]], curves_responses: list[list[float]], x_pred: float, p_replicas: int,
+) -> float:
+    """Variante validada de la Ec. E3.5 (Apéndice E.4 QUAM) para cuando se
+    dispone de VARIAS curvas de calibración independientes (p.ej. una por
+    día), replicando exactamente la metodología ya usada y validada por el
+    laboratorio en su hoja de estimación de incertidumbre (LA-F-210):
+
+      1. Se ajusta cada curva POR SEPARADO (una pendiente/intercepto por
+         curva) — no se agrupan los puntos crudos en una sola regresión.
+      2. Se promedian las pendientes y los interceptos de las curvas.
+      3. Se calcula la respuesta promedio en cada nivel (entre curvas).
+      4. Se recalcula la concentración de cada nivel usando la pendiente/
+         intercepto PROMEDIO aplicados a la respuesta PROMEDIO de ese nivel,
+         y su residual frente al nivel nominal.
+      5. Sx² = varianza muestral de esos residuales (uno por nivel, no uno
+         por punto crudo) — esto reduce correctamente el ruido entre curvas
+         antes de estimar la incertidumbre, en vez de inflarlo agrupando
+         puntos que no son observaciones independientes de una única recta.
+      6. Se aplica Ec. E3.5 con n = número total de puntos crudos (todas las
+         curvas) y p = réplicas de la muestra/resultado reportado (p.ej. el
+         diseño día×analista del proyecto), tal como especifica la guía.
+
+    Esto reemplaza el "pooling" ingenuo de todos los puntos crudos en una
+    sola regresión (que mezcla incorrectamente la variabilidad entre curvas
+    con el ruido de una única recta y sobreestima drásticamente la
+    incertidumbre, sobre todo lejos del centro del rango).
+
+    Requiere >=2 curvas con el mismo conjunto de niveles.
+    """
+    n_curvas = len(curves_levels)
+    if n_curvas < 2:
+        raise ValueError("Se requieren al menos 2 curvas de calibración independientes para este método.")
+    n_niveles = len(curves_levels[0])
+    levels = curves_levels[0]
+
+    slopes, intercepts = [], []
+    for lv, resp in zip(curves_levels, curves_responses):
+        lin = linearity(lv, resp, r_min=0.0)
+        slopes.append(lin.slope)
+        intercepts.append(lin.intercept)
+    slope_avg = sum(slopes) / n_curvas
+    intercept_avg = sum(intercepts) / n_curvas
+
+    y_avg_por_nivel = [
+        sum(curves_responses[c][j] for c in range(n_curvas)) / n_curvas
+        for j in range(n_niveles)
+    ]
+    x_recalc = [(y - intercept_avg) / slope_avg for y in y_avg_por_nivel]
+    residuos = [xr - xn for xr, xn in zip(x_recalc, levels)]
+
+    n_res = len(residuos)
+    if n_res < 3:
+        raise ValueError("Se requieren al menos 3 niveles de calibración para estimar Sx².")
+    mean_res = sum(residuos) / n_res
+    s2 = sum((r - mean_res) ** 2 for r in residuos) / (n_res - 1)
+
+    n_total = n_curvas * n_niveles
+    xbar = sum(levels) / n_niveles
+    sxx_pooled = n_curvas * sum((x - xbar) ** 2 for x in levels)
+    if sxx_pooled == 0:
+        raise ValueError("Todos los niveles de calibración son iguales; no se puede estimar Sxx.")
+
+    var_xpred = s2 * (1 / p_replicas + 1 / n_total + ((x_pred - xbar) ** 2) / sxx_pooled)
     return math.sqrt(var_xpred)
 
 
