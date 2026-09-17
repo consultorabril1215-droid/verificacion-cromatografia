@@ -1032,15 +1032,16 @@ elif page.startswith("5"):
                 pass
             u_repeat_rel = (prec.si / (sum(flat) / len(flat))) if prec and sum(flat) else 0.0
 
-            # incertidumbre de la respuesta de la curva (Ec. E3.4/E3.5), usando
-            # el MISMO modelo (simple/ponderado) decidido por ISO 8466-1 en la
-            # pestaña de curvas — un solo ajuste agrupando todas las curvas,
-            # no un ajuste distinto por curva.
+            # incertidumbre de la respuesta de la curva (Ec. E3.5, Apéndice E.4):
+            # ajusta cada curva por separado, promedia pendiente/intercepto,
+            # y usa el residual de la respuesta PROMEDIO por nivel — validado
+            # contra la metodología ya usada por el laboratorio en LA-F-210
+            # (reproduce sus valores de u_cal LC/LS con datos reales).
             all_lv_u, all_rs_u, _, _ = compound.curve_arrays()
             try:
-                cal_u = S.analyze_calibration(all_lv_u, all_rs_u, project.criteria.r_min)
-                res_x = [r / cal_u.slope for r in cal_u.residuales]
-                u_cal_abs = U.calibration_response_uncertainty(cal_u.puntos_x, res_x, nominal)
+                u_cal_abs = U.calibration_response_uncertainty_averaged_curves(
+                    all_lv_u, all_rs_u, nominal, p_replicas=project.design.n_replicas_total
+                )
                 u_cal_rel = u_cal_abs / nominal if nominal else 0.0
             except Exception as e:
                 u_cal_rel = 0.0
