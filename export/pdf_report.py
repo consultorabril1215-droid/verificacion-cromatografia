@@ -102,17 +102,21 @@ def build_pdf_report(project: VerificationProject, out_path: str = "data/Informe
     for compound in project.compounds:
         story.append(Paragraph(compound.nombre, ss["H2"]))
 
-        # Linealidad (última curva con datos, como resumen)
+        # Linealidad (modelo agrupado, Simple o Ponderada según ISO 8466-1)
         r_val = None
-        for curve in compound.calibration_curves:
-            if curve.levels_nominal and any(curve.responses):
-                try:
-                    lin = S.linearity(curve.levels_nominal, curve.responses, crit.r_min)
-                    r_val = lin.r
-                except Exception:
-                    pass
+        modelo_val = None
+        all_lv_p = [c.levels_nominal for c in compound.calibration_curves if any(c.responses)]
+        all_rs_p = [c.responses for c in compound.calibration_curves if any(c.responses)]
+        cal_p = None
+        if len(all_lv_p) >= 2 and all(len(l) >= 4 for l in all_lv_p):
+            try:
+                cal_p = S.analyze_calibration(all_lv_p, all_rs_p, crit.r_min)
+                r_val = cal_p.r
+                modelo_val = cal_p.modelo_usado
+            except Exception:
+                pass
 
-        row_summary = {"compuesto": compound.nombre, "r": r_val}
+        row_summary = {"compuesto": compound.nombre, "r": r_val, "modelo": modelo_val}
         level_data = [["Nivel", "n", "Media", "CV%", "Recuperación%", "Cumple"]]
         level_highlight = {}
         u_summary = {}
@@ -163,19 +167,11 @@ def build_pdf_report(project: VerificationProject, out_path: str = "data/Informe
                     u_rep_rel = prec.si / (sum(flat) / len(flat))
                 except Exception:
                     u_rep_rel = 0.0
-                all_levels, all_resid = [], []
-                for curve in compound.calibration_curves:
-                    if not curve.levels_nominal:
-                        continue
-                    try:
-                        lin = S.linearity(curve.levels_nominal, curve.responses, crit.r_min)
-                        res_y = S.residuals(curve.levels_nominal, curve.responses, lin.slope, lin.intercept)
-                        all_levels += curve.levels_nominal
-                        all_resid += [r / lin.slope for r in res_y]
-                    except Exception:
-                        continue
                 try:
-                    u_cal_abs = U.calibration_response_uncertainty(all_levels, all_resid, nominal)
+                    if cal_p is None:
+                        raise ValueError("Sin modelo de calibración calculado")
+                    res_x = [r / cal_p.slope for r in cal_p.residuales]
+                    u_cal_abs = U.calibration_response_uncertainty(cal_p.puntos_x, res_x, nominal)
                     u_cal_rel = u_cal_abs / nominal if nominal else 0.0
                 except Exception:
                     u_cal_rel = 0.0
