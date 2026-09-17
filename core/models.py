@@ -194,17 +194,70 @@ class VolumetricEquipmentRecord:
     nombre: str                          # p.ej. "Pipeta LA-116", "Balón aforado 5 mL clase A"
     tipo: str = "Pipeta"                 # "Pipeta", "Balón aforado", "Probeta", ...
     clase: str = "A"                     # clase de exactitud (ISO 8655 / ISO 1042)
-    capacidad_nominal: float = 0.0       # mL
+    capacidad_nominal: float = 0.0       # en `unidad_capacidad` (p.ej. pipetas de precisión suelen certificarse en µL)
+    unidad_capacidad: str = "mL"         # "mL" o "µL" — unidad en la que se registran capacidad/certificado/resolución
     codigo_interno: str = ""
     tiene_certificado_calibracion: bool = False
-    incertidumbre_certificado: float | None = None   # U (mL) del certificado de calibración del instrumento
+    incertidumbre_certificado: float | None = None   # U del certificado, en `unidad_capacidad`
     k_certificado: float = 2.0
+    # Resolución del instrumento (p.ej. última cifra del visor de una pipeta digital
+    # o graduación de un balón/probeta), en `unidad_capacidad` — componente Tipo B
+    # rectangular independiente de la tolerancia y de la calibración (QUAM Apéndice E2).
+    resolucion: float | None = None
     fecha_calibracion: str = ""
     # Si no hay certificado: tolerancia de clase/fabricante (QUAM Apéndice G, rectangular)
     tolerancia_fabricante: float | None = None
-    # Repetibilidad (Tipo A) caracterizada internamente (n réplicas de llenado/vaciado)
+    # Repetibilidad (Tipo A): réplicas crudas de llenado/vaciado (Hoja M, columnas E:N) —
+    # se registran SIEMPRE que se quiera verificar el instrumento por repetibilidad,
+    # tenga o no certificado de calibración (verificación intermedia sin calibración).
+    # `sd_repetibilidad`/`n_repetibilidad` quedan como respaldo manual (compatibilidad
+    # con registros antiguos) cuando no se cargan réplicas crudas.
+    repeticiones: list[float] = field(default_factory=list)   # en `unidad_capacidad`
     sd_repetibilidad: float | None = None
     n_repetibilidad: int = 10
+
+    @property
+    def factor_a_ml(self) -> float:
+        return 0.001 if self.unidad_capacidad == "µL" else 1.0
+
+    @property
+    def promedio_repeticiones(self) -> float | None:
+        return sum(self.repeticiones) / len(self.repeticiones) if self.repeticiones else None
+
+    @property
+    def sd_repeticiones(self) -> float | None:
+        n = len(self.repeticiones)
+        if n < 2:
+            return None
+        m = self.promedio_repeticiones
+        return (sum((v - m) ** 2 for v in self.repeticiones) / (n - 1)) ** 0.5
+
+    @property
+    def sd_efectiva_ml(self) -> float | None:
+        """SD de repetibilidad a usar, en mL: prioriza las réplicas crudas
+        registradas (Hoja M); si no hay, cae al SD manual digitado."""
+        sd = self.sd_repeticiones if self.repeticiones else self.sd_repetibilidad
+        return sd * self.factor_a_ml if sd is not None else None
+
+    @property
+    def n_efectivo(self) -> int:
+        return len(self.repeticiones) if self.repeticiones else self.n_repetibilidad
+
+    @property
+    def capacidad_nominal_ml(self) -> float:
+        return self.capacidad_nominal * self.factor_a_ml
+
+    @property
+    def incertidumbre_certificado_ml(self) -> float | None:
+        return self.incertidumbre_certificado * self.factor_a_ml if self.incertidumbre_certificado is not None else None
+
+    @property
+    def resolucion_ml(self) -> float | None:
+        return self.resolucion * self.factor_a_ml if self.resolucion is not None else None
+
+    @property
+    def tolerancia_fabricante_ml(self) -> float | None:
+        return self.tolerancia_fabricante * self.factor_a_ml if self.tolerancia_fabricante is not None else None
 
 
 @dataclass
@@ -241,6 +294,10 @@ class VolumetricStep:
     # Si no hay certificado: usar tolerancia de clase (ISO 8655 / ISO 1042) -> rectangular
     clase_tolerancia: str | None = None              # "A", "B", "A/S" ...
     tolerancia_fabricante: float | None = None       # mL, semi-intervalo
+    # Resolución del instrumento (mL) — componente Tipo B rectangular independiente
+    # de la tolerancia/calibración (QUAM Apéndice E2), tomada de la Hoja M si el
+    # instrumento se seleccionó del registro, o digitada manualmente.
+    resolucion: float | None = None
     # Repetibilidad (Tipo A) del uso del instrumento, si se dispone del dato interno
     sd_repetibilidad: float | None = None            # mL, desviación estándar de n réplicas
     n_repetibilidad: int = 10
