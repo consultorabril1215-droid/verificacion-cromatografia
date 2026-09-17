@@ -10,6 +10,8 @@ estructura de niveles/réplicas se configuran una sola vez al inicio.
 """
 from __future__ import annotations
 
+import inspect
+
 import pandas as pd
 import streamlit as st
 
@@ -23,6 +25,26 @@ from core import stats as S
 from core import uncertainty as U
 
 st.set_page_config(page_title="Verificación de Métodos + Incertidumbre", layout="wide")
+
+
+def _stretch_kwargs(func) -> dict:
+    """Ancho completo del contenedor para st.dataframe/st.data_editor, sea cual
+    sea la versión de Streamlit instalada: las versiones recientes solo
+    aceptan width='stretch' (use_container_width quedó deprecado), mientras
+    que versiones anteriores solo aceptan use_container_width=True (su
+    parámetro `width` únicamente admite un entero de píxeles). Se detecta en
+    tiempo de ejecución inspeccionando la anotación real del parámetro, para
+    que la app funcione igual en local y en Streamlit Community Cloud sin
+    perseguir números de versión."""
+    try:
+        ann = str(inspect.signature(func).parameters["width"].annotation)
+    except Exception:
+        ann = ""
+    return {"width": "stretch"} if "Width" in ann else {"use_container_width": True}
+
+
+_DATAFRAME_STRETCH = _stretch_kwargs(st.dataframe)
+_EDITOR_STRETCH = _stretch_kwargs(st.data_editor)
 
 # =============================================================================
 # Control de acceso a la descarga (solo administrador)
@@ -142,7 +164,7 @@ def render_design_panel(design):
              "Réplicas que debe generar": design.replicas_por_grupo}
             for i, g in enumerate(design.grupos)
         ]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, **_DATAFRAME_STRETCH)
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Grupos totales", design.n_grupos)
         c2.metric("Réplicas totales / nivel", design.n_replicas_total)
@@ -414,7 +436,11 @@ elif page.startswith("2"):
                       "U_expandida": 0.0, "k_certificado": 2.0, "k_asumido": True,
                       "pureza_%": None, "U_pureza_%": None}]
                 )
-                df_analitos = st.data_editor(df_default, num_rows="dynamic", key="cert_analitos_editor")
+                df_analitos = numeric_data_editor(
+                    df_default,
+                    ["conc_nominal", "conc_real", "U_expandida", "k_certificado", "pureza_%", "U_pureza_%"],
+                    num_rows="dynamic", key="cert_analitos_editor",
+                )
 
                 if st.form_submit_button("Guardar certificado", type="primary"):
                     analitos = [
@@ -426,8 +452,8 @@ elif page.startswith("2"):
                             incertidumbre_expandida=row["U_expandida"],
                             k_certificado=row["k_certificado"] or 2.0,
                             k_supuesto=bool(row["k_asumido"]),
-                            pureza_percent=row["pureza_%"],
-                            incertidumbre_pureza_percent=row["U_pureza_%"],
+                            pureza_percent=row["pureza_%"] or None,
+                            incertidumbre_pureza_percent=row["U_pureza_%"] or None,
                         )
                         for _, row in df_analitos.iterrows() if row["compuesto"]
                     ]
@@ -468,7 +494,7 @@ elif page.startswith("2"):
                     }
                     for a in cert.analitos
                 ]
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                st.dataframe(pd.DataFrame(rows), **_DATAFRAME_STRETCH)
 
     with tab_equip:
         st.caption(
@@ -492,16 +518,20 @@ elif page.startswith("2"):
               "incertidumbre_certificado": None, "k_certificado": 2.0, "resolucion": None,
               "fecha_calibracion": "", "tolerancia_fabricante": None}]
         )
-        df_eq = st.data_editor(
-            df_eq_default, num_rows="dynamic", key="equipment_editor", use_container_width=True,
+        df_eq = numeric_data_editor(
+            df_eq_default,
+            ["capacidad_nominal", "incertidumbre_certificado", "k_certificado", "resolucion", "tolerancia_fabricante"],
+            num_rows="dynamic", key="equipment_editor", **_EDITOR_STRETCH,
             column_config={
                 "tipo": st.column_config.SelectboxColumn(options=["Pipeta", "Balón aforado", "Probeta", "Jeringa", "Otro"]),
                 "clase": st.column_config.SelectboxColumn(options=["A", "B", "A/S", "N/A"]),
                 "unidad_capacidad": st.column_config.SelectboxColumn("Unidad", options=["mL", "µL"]),
-                "capacidad_nominal": st.column_config.NumberColumn("Capacidad", format="%.4f"),
-                "incertidumbre_certificado": st.column_config.NumberColumn("U certificado", format="%.4f"),
-                "resolucion": st.column_config.NumberColumn("Resolución", format="%.4f", help="Última cifra legible del visor/graduación, en la misma unidad que la capacidad."),
-                "tolerancia_fabricante": st.column_config.NumberColumn("Tolerancia (mL)", format="%.4f"),
+                "capacidad_nominal": st.column_config.TextColumn("Capacidad"),
+                "incertidumbre_certificado": st.column_config.TextColumn("U certificado"),
+                "resolucion": st.column_config.TextColumn(
+                    "Resolución", help="Última cifra legible del visor/graduación, en la misma unidad que la capacidad."
+                ),
+                "tolerancia_fabricante": st.column_config.TextColumn("Tolerancia (mL)"),
             },
         )
         if st.button("💾 Guardar registro de material volumétrico", type="primary"):
@@ -564,7 +594,6 @@ elif page.startswith("2"):
                             "Este instrumento no tiene certificado de calibración ni réplicas de "
                             "repetibilidad registradas — no hay ninguna verificación de su desempeño."
                         )
-            st.rerun()
 
 
 # =============================================================================
@@ -620,7 +649,7 @@ elif page.startswith("3"):
         df_wide = pd.DataFrame(wide)
         df_edit = numeric_data_editor(df_wide, list(wide.keys()),
                                        key=f"curves_wide_{compound.nombre}", num_rows="fixed",
-                                       use_container_width=True)
+                                       **_EDITOR_STRETCH)
         levels_col = df_edit["nivel_nominal"].tolist()
         for i, curve in enumerate(compound.calibration_curves):
             curve.levels_nominal = levels_col
@@ -673,7 +702,7 @@ elif page.startswith("3"):
                         lambda v: "background-color:#FFC7CE" if isinstance(v, (int, float)) and abs(v) > err_max else "",
                         subset=["% Error"],
                     ),
-                    use_container_width=True,
+                    **_DATAFRAME_STRETCH,
                 )
                 puntos_excedidos = [
                     (d, a, n, e) for d, a, n, e in zip(cal.dias, cal.analistas, cal.puntos_x, cal.error_percent)
@@ -1168,7 +1197,7 @@ elif page.startswith("5"):
                 "U expandida (abs)": round(b.u_expandida, 5),
                 "U relativa (%)": round(b.u_relativa_expandida_percent, 2),
             } for b in budget_levels])
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, **_DATAFRAME_STRETCH)
 
             if len(budget_levels) >= 2:
                 model = U.fit_level_dependent_model(budget_levels)
