@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from scipy import stats as _stats
 
 from .grubbs_table import grubbs_critical
+from .dixon_table import dixon_critical
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,183 @@ def residuals(levels: list[float], responses: list[float], slope: float, interce
 
 
 # ---------------------------------------------------------------------------
+# ISO 8466-1:1990 — Decisión del modelo de calibración (homogeneidad de
+# varianzas §4.1.2 y linealidad, prueba PG de Mandel §4.1.3), tal como las
+# aplica el laboratorio en su hoja de estimación de incertidumbre (LA-F-210).
+# Esto complementa la Ref. Rápida 5 de Eurachem (que solo pide inspección
+# visual + r) con un criterio estadístico objetivo para decidir si la curva
+# debe ajustarse con regresión simple o ponderada.
+# ---------------------------------------------------------------------------
+@dataclass
+class HomogeneityResult:
+    s_nivel_bajo: float
+    s_nivel_alto: float
+    f_calc: float
+    f_crit: float
+    homogenea: bool
+    decision: str
+
+
+def homogeneity_variance_test(level_replicates: dict[float, list[float]], alpha: float = 0.01) -> HomogeneityResult:
+    """ISO 8466-1 §4.1.2: compara la varianza de las réplicas en el nivel más
+    bajo y en el más alto de la curva (los niveles se replican una vez por
+    cada curva de calibración, p.ej. una vez por día).
+
+    `level_replicates`: {concentración_nivel: [respuesta en cada curva]}
+    """
+    niveles = sorted(level_replicates.keys())
+    nivel_bajo, nivel_alto = niveles[0], niveles[-1]
+    vals_bajo = level_replicates[nivel_bajo]
+    vals_alto = level_replicates[nivel_alto]
+    s_bajo = _sample_sd(vals_bajo)
+    s_alto = _sample_sd(vals_alto)
+    f_calc = (max(s_bajo, s_alto) / min(s_bajo, s_alto)) ** 2 if min(s_bajo, s_alto) > 0 else float("inf")
+    df = len(vals_bajo) - 1
+    f_crit = _stats.f.ppf(1 - alpha, df, df)
+    homogenea = f_calc <= f_crit
+    decision = "Homogénea: regresión simple (sin ponderar) es válida" if homogenea else "NO homogénea: usar regresión PONDERADA"
+    return HomogeneityResult(s_bajo, s_alto, f_calc, f_crit, homogenea, decision)
+
+
+@dataclass
+class MandelLinearityResult:
+    ds2: float
+    pg: float
+    f_crit: float
+    es_lineal: bool
+    decision: str
+
+
+def mandel_linearity_test(levels: list[float], responses: list[float], alpha: float = 0.01) -> MandelLinearityResult:
+    """ISO 8466-1 §4.1.3 (prueba PG de Mandel): compara el ajuste lineal
+    contra uno cuadrático. Si el término cuadrático no mejora
+    significativamente el ajuste, el modelo lineal es adecuado."""
+    n = len(levels)
+    if n < 4:
+        raise ValueError("Se requieren al menos 4 puntos de calibración para la prueba de Mandel.")
+    import numpy as np
+
+    x = np.array(levels, dtype=float)
+    y = np.array(responses, dtype=float)
+
+    lin_coefs = np.polyfit(x, y, 1)
+    y_pred_lin = np.polyval(lin_coefs, x)
+    ss_res_lin = float(np.sum((y - y_pred_lin) ** 2))
+    sy2_lin = ss_res_lin / (n - 2)
+
+    quad_coefs = np.polyfit(x, y, 2)
+    y_pred_quad = np.polyval(quad_coefs, x)
+    ss_res_quad = float(np.sum((y - y_pred_quad) ** 2))
+    sy2_quad = ss_res_quad / (n - 3)
+
+    ds2 = (n - 2) * sy2_lin - (n - 3) * sy2_quad
+    pg = max(0.0, ds2) / sy2_lin if sy2_lin else 0.0
+    f_crit = _stats.f.ppf(1 - alpha, 1, n - 3)
+    es_lineal = pg <= f_crit
+    decision = "LINEAL: aplica ISO 8466-1 Parte 1" if es_lineal else "NO LINEAL: revisar rango de trabajo o usar ajuste de 2° orden"
+    return MandelLinearityResult(ds2, pg, f_crit, es_lineal, decision)
+
+
+@dataclass
+class WeightedLinearityResult:
+    slope: float
+    intercept: float
+    r: float
+    r2: float
+    cumple_r: bool
+    weights: list[float]
+
+
+def weighted_linear_regression(levels: list[float], responses: list[float], weights: list[float], r_min: float) -> WeightedLinearityResult:
+    """Regresión lineal ponderada por mínimos cuadrados (usada cuando la
+    prueba de homogeneidad de varianzas indica heterocedasticidad),
+    consistente con ISO 8466-1 Parte 2. Pesos recomendados: wi = 1/si²
+    (inversa de la varianza de las réplicas en cada nivel)."""
+    import numpy as np
+
+    x = np.array(levels, dtype=float)
+    y = np.array(responses, dtype=float)
+    w = np.array(weights, dtype=float)
+    sw = w.sum()
+    xw = (w * x).sum() / sw
+    yw = (w * y).sum() / sw
+    sxxw = (w * (x - xw) ** 2).sum()
+    sxyw = (w * (x - xw) * (y - yw)).sum()
+    slope = sxyw / sxxw
+    intercept = yw - slope * xw
+    y_pred = slope * x + intercept
+    # r ponderado (coeficiente de correlación ponderado)
+    ss_res_w = (w * (y - y_pred) ** 2).sum()
+    ss_tot_w = (w * (y - yw) ** 2).sum()
+    r2 = 1 - ss_res_w / ss_tot_w if ss_tot_w else 0.0
+    r = math.copysign(math.sqrt(abs(r2)), slope)
+    return WeightedLinearityResult(slope, intercept, r, r2, r >= r_min, list(weights))
+
+
+@dataclass
+class CalibrationAnalysis:
+    homogeneidad: HomogeneityResult
+    linealidad_mandel: MandelLinearityResult
+    modelo_usado: str                    # "Simple" o "Ponderada"
+    slope: float
+    intercept: float
+    r: float
+    r2: float
+    cumple_r: bool
+    puntos_x: list[float]
+    puntos_y: list[float]
+    residuales: list[float]              # y_obs - y_pred (unidades de señal)
+    x_recalculada: list[float]           # concentración recalculada desde la curva
+    error_percent: list[float]           # % error de la concentración recalculada vs. nominal
+
+
+def analyze_calibration(all_curves_levels: list[list[float]], all_curves_responses: list[list[float]], r_min: float) -> CalibrationAnalysis:
+    """Orquesta el análisis completo de la(s) curva(s) de calibración de un
+    compuesto: homogeneidad de varianzas -> linealidad de Mandel -> decide y
+    ajusta el modelo (simple o ponderado) -> calcula residuales, concentración
+    recalculada y % error para cada punto.
+
+    `all_curves_levels`/`all_curves_responses`: una lista por curva (p.ej. una
+    por día), cada una con los niveles/respuestas de esa curva.
+    """
+    pooled_levels = [x for curve in all_curves_levels for x in curve]
+    pooled_responses = [y for curve in all_curves_responses for y in curve]
+
+    level_replicates: dict[float, list[float]] = {}
+    for curve_levels, curve_responses in zip(all_curves_levels, all_curves_responses):
+        for lvl, resp in zip(curve_levels, curve_responses):
+            level_replicates.setdefault(lvl, []).append(resp)
+
+    homog = homogeneity_variance_test(level_replicates)
+    mandel = mandel_linearity_test(pooled_levels, pooled_responses)
+
+    if homog.homogenea:
+        lin = linearity(pooled_levels, pooled_responses, r_min)
+        slope, intercept, r, r2, cumple = lin.slope, lin.intercept, lin.r, lin.r2, lin.cumple_r
+        modelo = "Simple"
+    else:
+        # peso por punto = 1 / varianza de las réplicas de SU nivel
+        weights = []
+        for lvl in pooled_levels:
+            s = _sample_sd(level_replicates[lvl])
+            weights.append(1.0 / (s ** 2) if s > 0 else 1.0)
+        wlin = weighted_linear_regression(pooled_levels, pooled_responses, weights, r_min)
+        slope, intercept, r, r2, cumple = wlin.slope, wlin.intercept, wlin.r, wlin.r2, wlin.cumple_r
+        modelo = "Ponderada"
+
+    res = residuals(pooled_levels, pooled_responses, slope, intercept)
+    x_recalc = [(y - intercept) / slope for y in pooled_responses]
+    err_pct = [((xr - xn) / xn) * 100 if xn else float("nan") for xr, xn in zip(x_recalc, pooled_levels)]
+
+    return CalibrationAnalysis(
+        homogeneidad=homog, linealidad_mandel=mandel, modelo_usado=modelo,
+        slope=slope, intercept=intercept, r=r, r2=r2, cumple_r=cumple,
+        puntos_x=pooled_levels, puntos_y=pooled_responses,
+        residuales=res, x_recalculada=x_recalc, error_percent=err_pct,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Prueba de Grubbs (dato anómalo único) — usada en linealidad, LC, LS, precisión
 # ---------------------------------------------------------------------------
 @dataclass
@@ -68,6 +246,62 @@ def grubbs_test(values: list[float], alpha: float = 0.05) -> GrubbsResult:
     hay_bajo = g_crit is not None and g_bajo > g_crit
     hay_alto = g_crit is not None and g_alto > g_crit
     return GrubbsResult(n, g_crit, g_bajo, g_alto, hay_bajo, hay_alto)
+
+
+@dataclass
+class DixonResult:
+    n: int
+    q_critico: float | None
+    q_bajo: float
+    q_alto: float
+    hay_atipico_bajo: bool
+    hay_atipico_alto: bool
+
+
+def dixon_test(values: list[float]) -> DixonResult:
+    """Prueba Q de Dixon (rechazo de UN dato sospechoso), tabla del formato
+    LA-F-210, n=4..20. Q = brecha con el vecino más cercano / rango total."""
+    n = len(values)
+    q_crit = dixon_critical(n)
+    ordered = sorted(values)
+    rango = ordered[-1] - ordered[0]
+    if rango == 0:
+        return DixonResult(n, q_crit, 0.0, 0.0, False, False)
+    q_bajo = (ordered[1] - ordered[0]) / rango
+    q_alto = (ordered[-1] - ordered[-2]) / rango
+    hay_bajo = q_crit is not None and q_bajo > q_crit
+    hay_alto = q_crit is not None and q_alto > q_crit
+    return DixonResult(n, q_crit, q_bajo, q_alto, hay_bajo, hay_alto)
+
+
+@dataclass
+class OutlierTestResult:
+    prueba_usada: str        # "Dixon" o "Grubbs"
+    n: int
+    valor_critico: float | None
+    estadistico_bajo: float
+    estadistico_alto: float
+    hay_atipico: bool
+    detalle: object           # DixonResult o GrubbsResult completo
+
+
+def outlier_test_auto(values: list[float], alpha: float = 0.05) -> OutlierTestResult:
+    """Selecciona automáticamente la prueba de dato atípico según el número
+    de datos disponibles: Dixon (Q) para muestras pequeñas (n=4 a 7, donde es
+    la prueba clásicamente recomendada por su mayor potencia con pocos datos)
+    y Grubbs para n=8 en adelante. [CRITERIO TÉCNICO PROPUESTO — convención
+    habitual en química analítica; ambas tablas provienen del formato
+    LA-F-210 del laboratorio]. Con n<4 ninguna prueba es aplicable."""
+    n = len(values)
+    if n < 4:
+        return OutlierTestResult("Ninguna (n<4)", n, None, 0.0, 0.0, False, None)
+    if n <= 7:
+        d = dixon_test(values)
+        return OutlierTestResult("Dixon", n, d.q_critico, d.q_bajo, d.q_alto,
+                                  d.hay_atipico_bajo or d.hay_atipico_alto, d)
+    g = grubbs_test(values, alpha)
+    return OutlierTestResult("Grubbs", n, g.g_critico, g.g_bajo, g.g_alto,
+                              g.hay_atipico_bajo or g.hay_atipico_alto, g)
 
 
 def _sample_sd(values: list[float]) -> float:
