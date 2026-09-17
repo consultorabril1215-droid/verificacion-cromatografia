@@ -69,19 +69,48 @@ def build_pdf_report(project: VerificationProject, out_path: str = "data/Informe
     story.append(Paragraph(
         f"Método de referencia: {m.metodo_referencia} &nbsp;|&nbsp; Procedimiento interno: {m.procedimiento_interno}",
         ss["Body"]))
-    story.append(Paragraph(f"Fecha del informe: {date.today().isoformat()} &nbsp;|&nbsp; Analista(s): "
+    story.append(Paragraph(
+        f"Código: <b>{m.codigo_formato}</b> &nbsp;|&nbsp; Versión: <b>{m.version}</b> &nbsp;|&nbsp; "
+        f"Fecha: <b>{m.fecha.isoformat()}</b>", ss["Body"]))
+    story.append(Paragraph(f"Laboratorio: {m.laboratorio} &nbsp;|&nbsp; Analista(s): "
                             f"{', '.join(m.analistas)}", ss["Body"]))
     story.append(Spacer(1, 10))
 
-    story.append(Paragraph("Objetivo", ss["H2"]))
+    story.append(Paragraph("1. Objetivo", ss["H2"]))
     story.append(Paragraph(
         f"Verificar que el laboratorio genera resultados confiables para {m.ensayo} mediante {m.tecnica} "
         f"en la matriz {m.matriz}, evaluando linealidad, límite de cuantificación (LC), límite superior (LS), "
-        f"precisión, veracidad e incertidumbre de medición, según la Guía Eurachem \"La Adecuación al Uso de "
-        f"los Métodos Analíticos\" (2ª ed.) y la Guía EURACHEM/CITAC CG4 \"Cuantificación de la Incertidumbre "
-        f"en Medidas Analíticas\" (QUAM:2012).", ss["Body"]))
+        f"rango de trabajo, precisión, veracidad e incertidumbre de medición.", ss["Body"]))
 
-    story.append(Paragraph("Criterios de aceptación aplicados", ss["H2"]))
+    story.append(Paragraph("2. Alcance", ss["H2"]))
+    story.append(Paragraph(
+        f"Los ensayos de verificación se llevaron a cabo utilizando estándares y muestras de matriz "
+        f"{m.matriz}. Al emplearse un método normalizado ({m.metodo_referencia}), se evaluaron: linealidad, "
+        f"límite de cuantificación (LC), límite superior (LS), precisión (repetibilidad y precisión "
+        f"intermedia), veracidad (sesgo/recuperación) e incertidumbre de medición, conforme a la Guía "
+        f"Eurachem \"La Adecuación al Uso de los Métodos Analíticos\" (2ª ed.) y la Guía EURACHEM/CITAC CG4 "
+        f"\"Cuantificación de la Incertidumbre en Medidas Analíticas\" (QUAM:2012).", ss["Body"]))
+
+    story.append(Paragraph("3. Recursos utilizados", ss["H2"]))
+    story.append(Paragraph(
+        f"Todos los ensayos se realizaron siguiendo el procedimiento {m.procedimiento_interno}.", ss["Body"]))
+    if m.equipos:
+        story.append(Paragraph("Instrumentos de medición", ss["Body"]))
+        eq_rows = [["Equipo", "Marca", "Código interno"]] + [
+            [e.get("equipo", ""), e.get("marca", ""), e.get("codigo_interno", "")] for e in m.equipos
+        ]
+        story.append(_table(eq_rows, col_widths=[6 * cm, 4 * cm, 4 * cm]))
+        story.append(Spacer(1, 6))
+    if project.certificates:
+        story.append(Paragraph("Materiales de referencia (MRC) certificados", ss["Body"]))
+        cert_rows = [["Proveedor", "Parte/Lote", "Compuestos", "Vence"]]
+        for c in project.certificates:
+            compuestos = ", ".join(a.nombre_compuesto for a in c.analitos)
+            cert_rows.append([c.proveedor, f"{c.numero_parte}/{c.numero_lote}", compuestos, c.fecha_expiracion])
+        story.append(_table(cert_rows, col_widths=[3.5 * cm, 3 * cm, 5.5 * cm, 2 * cm]))
+        story.append(Spacer(1, 6))
+
+    story.append(Paragraph("4. Criterios de aceptación aplicados", ss["H2"]))
     crit_data = [
         ["Característica", "Criterio"],
         ["Linealidad (r)", f"≥ {crit.r_min}"],
@@ -94,6 +123,12 @@ def build_pdf_report(project: VerificationProject, out_path: str = "data/Informe
     ]
     story.append(_table(crit_data, col_widths=[8 * cm, 7 * cm]))
     story.append(PageBreak())
+
+    story.append(Paragraph("5. Resultados", ss["H1"]))
+    story.append(Paragraph(
+        "A continuación se exponen e interpretan los resultados obtenidos en los ensayos de verificación "
+        "del método, por compuesto.", ss["Body"]))
+    story.append(Spacer(1, 6))
 
     resumen_rows = [["Compuesto", "r", "LC: Recup.%", "LC: CV%", "LS: Recup.%", "LS: CV%",
                      "U(LC) rel.%", "U(LS) rel.%", "Conclusión"]]
@@ -207,7 +242,7 @@ def build_pdf_report(project: VerificationProject, out_path: str = "data/Informe
         resumen_highlight[r_idx_sum] = (conclusion == "CONFORME")
 
     story.append(PageBreak())
-    story.append(Paragraph("Resumen general y declaración de conformidad", ss["H1"]))
+    story.append(Paragraph("6. Resumen general y declaración de conformidad", ss["H1"]))
     story.append(_table(resumen_rows, highlight_rows=resumen_highlight))
     story.append(Spacer(1, 10))
     todos_conformes = all(resumen_highlight.values()) if resumen_highlight else False
