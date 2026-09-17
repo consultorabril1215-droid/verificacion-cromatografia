@@ -126,6 +126,44 @@ page = st.sidebar.radio(
 )
 
 # =============================================================================
+# Guardado / carga en Drive (compartido entre analistas y administrador)
+# =============================================================================
+st.sidebar.divider()
+st.sidebar.markdown("### ☁️ Guardado compartido")
+try:
+    from core.persistence import drive_configured, save_project_to_drive, load_project_from_drive
+    if drive_configured():
+        if "last_saved" not in st.session_state:
+            st.session_state.last_saved = None
+        if st.sidebar.button("💾 Guardar en Drive", use_container_width=True):
+            try:
+                save_project_to_drive(project)
+                st.session_state.last_saved = "ahora mismo"
+                st.sidebar.success("Guardado.")
+            except Exception as e:
+                st.sidebar.error(f"No se pudo guardar: {e}")
+        if st.sidebar.button("📥 Cargar último guardado", use_container_width=True):
+            try:
+                loaded, modified = load_project_from_drive()
+                if loaded is None:
+                    st.sidebar.warning("Todavía no hay nada guardado en Drive.")
+                else:
+                    st.session_state.project = loaded
+                    st.sidebar.success(f"Cargado (última modificación: {modified}).")
+                    st.rerun()
+            except Exception as e:
+                st.sidebar.error(f"No se pudo cargar: {e}")
+        if st.session_state.last_saved:
+            st.sidebar.caption(f"Último guardado: {st.session_state.last_saved}")
+    else:
+        st.sidebar.caption(
+            "No configurado todavía (falta agregar la cuenta de servicio en Secrets). "
+            "Mientras tanto, los datos solo viven en esta sesión del navegador."
+        )
+except ImportError:
+    st.sidebar.caption("Módulo de Drive no disponible (faltan dependencias).")
+
+# =============================================================================
 # 1. Método y criterios
 # =============================================================================
 if page.startswith("1"):
