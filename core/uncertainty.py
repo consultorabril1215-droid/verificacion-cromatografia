@@ -52,6 +52,7 @@ class VolumetricStepUncertainty:
     u_calibracion_o_tolerancia: float   # mL
     u_repetibilidad: float              # mL
     u_temperatura: float                # mL
+    u_resolucion: float                 # mL
     u_combinada_abs: float              # mL
     u_relativa: float                   # adimensional (u/V)
     fuente_calibracion: str             # texto para trazabilidad en el informe
@@ -90,9 +91,17 @@ def volumetric_step_uncertainty(
     else:
         u_temp = 0.0
 
-    u_abs = combine_rss([u_cal, u_rep, u_temp])
+    # --- componente de resolución del instrumento (Tipo B rectangular, QUAM
+    # Apéndice E2) — independiente de la tolerancia/calibración: la mitad de
+    # la resolución (última cifra legible) como semi-intervalo ---
+    if step.resolucion:
+        u_res = (step.resolucion / 2) / math.sqrt(3)
+    else:
+        u_res = 0.0
+
+    u_abs = combine_rss([u_cal, u_rep, u_temp, u_res])
     u_rel = u_abs / step.volumen_nominal if step.volumen_nominal else 0.0
-    return VolumetricStepUncertainty(u_cal, u_rep, u_temp, u_abs, u_rel, fuente)
+    return VolumetricStepUncertainty(u_cal, u_rep, u_temp, u_res, u_abs, u_rel, fuente)
 
 
 # ---------------------------------------------------------------------------
