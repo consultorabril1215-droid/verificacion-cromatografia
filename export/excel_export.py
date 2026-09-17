@@ -449,12 +449,6 @@ def build_verification_excel(project: VerificationProject, out_path: str = "data
             u_vm_rel = u_vm.u_relativa if u_vm else 0.0
             all_lv_e = [c.levels_nominal for c in compound.calibration_curves if any(c.responses)]
             all_rs_e = [c.responses for c in compound.calibration_curves if any(c.responses)]
-            cal_e = None
-            if len(all_lv_e) >= 2 and all(len(l) >= 4 for l in all_lv_e):
-                try:
-                    cal_e = S.analyze_calibration(all_lv_e, all_rs_e, crit.r_min)
-                except Exception:
-                    cal_e = None
             for label, nominal in [("LC", compound.lc_nominal), ("LS", compound.ls_nominal)]:
                 lvl = next((r for r in compound.replicate_levels if r.label == label), None)
                 if lvl is None:
@@ -472,10 +466,9 @@ def build_verification_excel(project: VerificationProject, out_path: str = "data
                 except Exception:
                     u_rep_rel = 0.0
                 try:
-                    if cal_e is None:
-                        raise ValueError("Sin modelo de calibración")
-                    res_x = [rr / cal_e.slope for rr in cal_e.residuales]
-                    u_cal_abs = U.calibration_response_uncertainty(cal_e.puntos_x, res_x, nominal)
+                    u_cal_abs = U.calibration_response_uncertainty_averaged_curves(
+                        all_lv_e, all_rs_e, nominal, p_replicas=project.design.n_replicas_total
+                    )
                     u_cal_rel = u_cal_abs / nominal if nominal else 0.0
                 except Exception:
                     u_cal_rel = 0.0
