@@ -68,7 +68,7 @@ class MethodInfo:
 # ---------------------------------------------------------------------------
 @dataclass
 class DesignStructure:
-    n_dias: int = 2
+    n_dias: int = 3
     analistas: list[str] = field(default_factory=lambda: ["Analista A", "Analista B"])
     replicas_por_grupo: int = 2
     n_niveles_curva: int = 6
