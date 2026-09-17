@@ -185,8 +185,7 @@ def build_pdf_report(project: VerificationProject, out_path: str = "data/Informe
         story.append(Spacer(1, 6))
 
         # Incertidumbre resumida
-        if compound.standard_preparation and compound.standard_preparation.steps:
-            prep_u = U.standard_preparation_uncertainty(compound.standard_preparation)
+        if compound.standard_preparation and compound.standard_preparation.dilution_levels:
             u_vm = U.volumetric_step_uncertainty(compound.volumen_muestra) if compound.volumen_muestra else None
             u_vm_rel = u_vm.u_relativa if u_vm else 0.0
             u_rows = [["Nivel", "Concentración", "U expandida", "U relativa %", "Resultado"]]
@@ -196,6 +195,10 @@ def build_pdf_report(project: VerificationProject, out_path: str = "data/Informe
                     continue
                 flat = [v for day in lvl.values for v in day]
                 if not any(flat):
+                    continue
+                try:
+                    prep_u = U.standard_preparation_uncertainty_at(compound.standard_preparation, nominal)
+                except Exception:
                     continue
                 try:
                     prec = S.repeatability_intermediate_precision(lvl.values)
