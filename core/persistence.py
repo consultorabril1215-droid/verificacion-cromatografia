@@ -36,7 +36,8 @@ import streamlit as st
 from .models import (
     AcceptanceCriteria, MethodInfo, DesignStructure, Compound, CalibrationCurve,
     ReplicateLevel, CertificateRecord, CertificateAnalyte, ReferenceMaterialCert,
-    VolumetricStep, StandardPreparation, VerificationProject,
+    VolumetricStep, StandardPreparation, VerificationProject, DilutionLevel,
+    VolumetricEquipmentRecord,
 )
 
 DEFAULT_FOLDER_ID = "13HeurdiKovvtC7GUUJ6LK0weYZ6HDOvp"
@@ -74,6 +75,26 @@ def _find_file(service, folder_id: str, filename: str):
     return files[0] if files else None
 
 
+def sanitize_project_filename(nombre: str) -> str:
+    """Convierte el nombre de un proyecto (p.ej. 'THM - Agua - Cromatografía') en
+    un nombre de archivo seguro para Drive, único por proyecto."""
+    import re
+    slug = re.sub(r"[^\w\-. ]", "", nombre).strip().replace(" ", "_")
+    return f"{slug or 'proyecto'}.json"
+
+
+def list_projects_in_drive() -> list[dict]:
+    """Lista los proyectos guardados en la carpeta compartida de Drive:
+    [{'filename': ..., 'nombre': ..., 'modifiedTime': ...}, ...], más recientes primero.
+    Excluye el archivo legacy de un solo proyecto compartido (DEFAULT_FILENAME)."""
+    service = _get_drive_service()
+    folder_id = _get_folder_id()
+    q = f"'{folder_id}' in parents and name contains '.json' and trashed=false"
+    res = service.files().list(q=q, fields="files(id,name,modifiedTime)", orderBy="modifiedTime desc").execute()
+    files = [f for f in res.get("files", []) if f["name"] != DEFAULT_FILENAME]
+    return [{"filename": f["name"], "nombre": f["name"][:-5], "modifiedTime": f["modifiedTime"]} for f in files]
+
+
 # ---------------------------------------------------------------------------
 # Serialización (dataclasses <-> dict JSON-compatible)
 # ---------------------------------------------------------------------------
@@ -104,12 +125,19 @@ def _project_from_dict(d: dict) -> VerificationProject:
         cd["analitos"] = analitos
         certificates.append(CertificateRecord(**cd))
 
+    equipment = [VolumetricEquipmentRecord(**e) for e in d.get("equipment", [])]
+
     def _prep_from_dict(sp):
         if not sp:
             return None
         rm = ReferenceMaterialCert(**sp["reference_material"])
-        steps = [VolumetricStep(**s) for s in sp.get("steps", [])]
-        return StandardPreparation(reference_material=rm, steps=steps)
+        niveles = []
+        for lv in sp.get("dilution_levels", []):
+            niveles.append(DilutionLevel(
+                nivel_label=lv["nivel_label"], concentracion_nominal=lv["concentracion_nominal"],
+                alicuota=VolumetricStep(**lv["alicuota"]), aforo=VolumetricStep(**lv["aforo"]),
+            ))
+        return StandardPreparation(reference_material=rm, dilution_levels=niveles)
 
     compounds = []
     for c in d.get("compounds", []):
@@ -126,7 +154,7 @@ def _project_from_dict(d: dict) -> VerificationProject:
         ))
 
     return VerificationProject(method=method, criteria=criteria, design=design,
-                                compounds=compounds, certificates=certificates)
+                                compounds=compounds, certificates=certificates, equipment=equipment)
 
 
 # ---------------------------------------------------------------------------
