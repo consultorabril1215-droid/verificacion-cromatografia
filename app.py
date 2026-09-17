@@ -818,6 +818,13 @@ elif page.startswith("5"):
 elif page.startswith("6"):
     st.header("6. Exportar resultados")
 
+    viewer = get_viewer_email()
+    if viewer is None:
+        st.info("La descarga está reservada al administrador. Inicia sesión con Google para verificar tu acceso.")
+        if hasattr(st, "login") and st.button("🔐 Iniciar sesión con Google", type="primary"):
+            st.login()
+        st.stop()
+
     if not is_admin_user():
         st.warning(
             "🔒 La descarga de archivos está reservada al administrador del sistema. "
@@ -825,10 +832,12 @@ elif page.startswith("6"):
             "verificación) y Sección 5 (Incertidumbre) — solo la exportación a Excel/PDF está "
             "restringida."
         )
-        viewer = get_viewer_email()
-        if viewer:
-            st.caption(f"Conectado como: {viewer}")
+        st.caption(f"Conectado como: {viewer}")
         st.stop()
+
+    st.caption(f"✅ Sesión de administrador: {viewer}")
+    if hasattr(st, "logout") and st.button("Cerrar sesión"):
+        st.logout()
 
     st.caption(
         "Genera el Excel de verificación (con fórmulas vivas, no solo valores — para que un "
