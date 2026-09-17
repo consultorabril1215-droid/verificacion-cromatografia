@@ -104,21 +104,25 @@ def _project_from_dict(d: dict) -> VerificationProject:
         cd["analitos"] = analitos
         certificates.append(CertificateRecord(**cd))
 
+    def _prep_from_dict(sp):
+        if not sp:
+            return None
+        rm = ReferenceMaterialCert(**sp["reference_material"])
+        steps = [VolumetricStep(**s) for s in sp.get("steps", [])]
+        return StandardPreparation(reference_material=rm, steps=steps)
+
     compounds = []
     for c in d.get("compounds", []):
         curves = [CalibrationCurve(**cc) for cc in c.get("calibration_curves", [])]
         levels = [ReplicateLevel(**rl) for rl in c.get("replicate_levels", [])]
-        prep = None
-        if c.get("standard_preparation"):
-            sp = c["standard_preparation"]
-            rm = ReferenceMaterialCert(**sp["reference_material"])
-            steps = [VolumetricStep(**s) for s in sp.get("steps", [])]
-            prep = StandardPreparation(reference_material=rm, steps=steps)
+        prep = _prep_from_dict(c.get("standard_preparation"))
+        surrogate_prep = _prep_from_dict(c.get("surrogate_preparation"))
         vm = VolumetricStep(**c["volumen_muestra"]) if c.get("volumen_muestra") else None
         compounds.append(Compound(
             nombre=c["nombre"], lc_nominal=c["lc_nominal"], ls_nominal=c["ls_nominal"],
             calibration_curves=curves, replicate_levels=levels,
             standard_preparation=prep, volumen_muestra=vm,
+            surrogate_preparation=surrogate_prep,
         ))
 
     return VerificationProject(method=method, criteria=criteria, design=design,
