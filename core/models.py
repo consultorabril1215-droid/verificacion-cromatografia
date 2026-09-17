@@ -31,6 +31,11 @@ class AcceptanceCriteria:
     t_alpha: float = 0.05                    # Nivel de significancia prueba t (dos colas)
     k_coverage: int = 2                      # Factor de cobertura incertidumbre expandida
     confidence_level_percent: float = 95.0
+    # Esquema de control de calidad por lote de muestras (LA-P-343/LA-P-340,
+    # Tabla 5 — idéntico para todas las técnicas cromatográficas del
+    # laboratorio, no depende del método/analito):
+    rpd_max_percent: float = 30.0            # Duplicados (DM / LFMD)
+    mb_debe_ser_menor_que_lc: bool = True     # Blanco del método (MB) < LC
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +119,22 @@ class ReplicateLevel:
     label: str                       # p.ej. "LC", "LS", "Muestra SUP", "Muestra SUP+LC"
     nominal: float | None            # valor teórico esperado (None si no aplica, p.ej. blanco)
     values: list[list[float]]        # [dia][replica] -> concentración medida
+    # Tipo de control de calidad (Tabla 5, LA-P-343/LA-P-340). Determina qué
+    # cálculo y criterio aplica — no todos los niveles se comparan igual:
+    #   "LC", "LS", "LFB"  -> recuperación simple (media/nominal), 1 vez/mes
+    #   "MB"               -> blanco del método, debe ser < LC, siempre
+    #   "Muestra"          -> resultado nativo, sin valor esperado, solo se reporta
+    #   "Subrogado"        -> recuperación simple por muestra (agregado en cantidad
+    #                         conocida a CADA muestra), 70-130%, siempre
+    #   "LFM"              -> matriz de laboratorio fortificada: recuperación NETA,
+    #                         (media_LFM - media_muestra_nativa)/adicionado, 70-130%
+    #   "LFMD"             -> duplicado de LFM: igual cálculo que LFM, más RPD vs. LFM
+    #   "DM"               -> duplicado de muestra nativa: RPD vs. la muestra nativa
+    tipo: str = "Muestra"
+    # Para "LFM"/"LFMD"/"DM": label de OTRO ReplicateLevel del mismo compuesto
+    # contra el cual se resta (LFM/LFMD) o se calcula el RPD (DM/LFMD)
+    referencia_nativa: str | None = None
+    referencia_duplicado: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +240,12 @@ class Compound:
     standard_preparation: StandardPreparation | None = None
     # Volumen de muestra usado en el ensayo de rutina (para u(volumen muestra))
     volumen_muestra: VolumetricStep | None = None
+    # Preparación del estándar SUBROGADO — es también un MRC certificado y se
+    # diluye junto con el estándar del analito (ver Tabla 2, LA-P-343/LA-P-340).
+    # Se documenta aquí por trazabilidad; NO se combina en la incertidumbre del
+    # analito objetivo (son solutos independientes en la misma dilución), pero
+    # sí se necesitaría si en el futuro se quiere estimar U del subrogado.
+    surrogate_preparation: StandardPreparation | None = None
 
 
 @dataclass
