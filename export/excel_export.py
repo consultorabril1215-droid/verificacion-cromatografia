@@ -172,7 +172,9 @@ def _write_calibration_block(ws, row0, compound, crit, tablas_sheet):
     try:
         all_lv = [c.levels_nominal for c in curves]
         all_rs = [c.responses for c in curves]
-        cal = S.analyze_calibration(all_lv, all_rs, crit.r_min)
+        dias_c = [c.dia or (i + 1) for i, c in enumerate(curves)]
+        analistas_c = [c.analista for c in curves]
+        cal = S.analyze_calibration(all_lv, all_rs, crit.r_min, dias_c, analistas_c)
         ws.cell(row=row, column=1, value="Prueba de linealidad de Mandel (ISO 8466-1 §4.1.3) y modelo final").font = BOLD
         ws.cell(row=row, column=6,
                 value="⚠️ Calculado por la aplicación (ajuste cuadrático / regresión ponderada no son "
@@ -196,23 +198,39 @@ def _write_calibration_block(ws, row0, compound, crit, tablas_sheet):
         row += 2
 
         ws.cell(row=row, column=1, value="Residuales y % error (según modelo final aplicado)").font = BOLD
+        if cal.modelo_usado != "Simple":
+            ws.cell(row=row, column=6,
+                    value="⚠️ Modelo Ponderado: columnas calculadas por la app (no fórmula nativa)"
+                    ).font = Font(italic=True, size=8, color="806000")
         row += 1
-        _hdr(ws, row, 1, "Nivel"); _hdr(ws, row, 2, "Respuesta"); _hdr(ws, row, 3, "Residual")
-        _hdr(ws, row, 4, "Conc. recalculada"); _hdr(ws, row, 5, "% Error")
+        _hdr(ws, row, 1, "Día"); _hdr(ws, row, 2, "Analista"); _hdr(ws, row, 3, "Nivel")
+        _hdr(ws, row, 4, "Respuesta"); _hdr(ws, row, 5, "Residual")
+        _hdr(ws, row, 6, "Conc. recalculada"); _hdr(ws, row, 7, "% Error")
         row += 1
-        for x, y, res, xr, err in zip(cal.puntos_x, cal.puntos_y, cal.residuales, cal.x_recalculada, cal.error_percent):
-            ws.cell(row=row, column=1, value=x)
-            ws.cell(row=row, column=2, value=y)
-            ws.cell(row=row, column=3, value=round(res, 5))
-            ws.cell(row=row, column=4, value=round(xr, 5))
-            c = ws.cell(row=row, column=5, value=round(err, 2))
-            if abs(err) > 15:
+        err_max = crit.error_rel_max_percent
+        for dia, analista, x, y, res, xr, err in zip(
+            cal.dias, cal.analistas, cal.puntos_x, cal.puntos_y, cal.residuales, cal.x_recalculada, cal.error_percent
+        ):
+            ws.cell(row=row, column=1, value=dia)
+            ws.cell(row=row, column=2, value=analista)
+            ws.cell(row=row, column=3, value=x)
+            ws.cell(row=row, column=4, value=y)
+            if cal.modelo_usado == "Simple":
+                # fórmulas vivas: referencian la pendiente/intercepto ya calculados arriba (Simple)
+                _formula(ws, row, 5, f"=D{row}-($B${r_slope}*C{row}+$B${r_intercept})")
+                _formula(ws, row, 6, f"=(D{row}-$B${r_intercept})/$B${r_slope}")
+                _formula(ws, row, 7, f"=((F{row}-C{row})/C{row})*100")
+            else:
+                ws.cell(row=row, column=5, value=round(res, 5))
+                ws.cell(row=row, column=6, value=round(xr, 5))
+                ws.cell(row=row, column=7, value=round(err, 2))
+            c = ws.cell(row=row, column=7)
+            if abs(err) > err_max:
                 c.fill = RED
             row += 1
     except Exception as e:
         ws.cell(row=row, column=1, value=f"(No se pudo completar el análisis Mandel/ponderado: {e})")
         row += 1
-        r_slope_final, r_intercept_final = r_slope, r_intercept
 
     return row + 1, {"slope_cell": f"B{r_slope}", "intercept_cell": f"B{r_intercept}"}
 
@@ -417,7 +435,7 @@ def build_verification_excel(project: VerificationProject, out_path: str = "data
         # múltiples fuentes -- prep. estándar, certificados -- que no viven
         # como celdas en esta hoja; se referencia el Sr/SI ya calculado arriba
         # cuando corresponde) ---
-        if compound.standard_preparation and compound.standard_preparation.steps:
+        if compound.standard_preparation and compound.standard_preparation.dilution_levels:
             ws.cell(row=row, column=1, value="INCERTIDUMBRE DE MEDICIÓN (QUAM:2012 CG4)").font = BOLD
             ws.cell(row=row, column=6, value="⚠️ Valores calculados por la app (combina fuentes externas: "
                                               "certificados MRC, material volumétrico)").font = Font(italic=True, size=8, color="806000")
@@ -427,7 +445,6 @@ def build_verification_excel(project: VerificationProject, out_path: str = "data
             _hdr(ws, row, 7, "uc"); _hdr(ws, row, 8, "U expandida"); _hdr(ws, row, 9, "U relativa %")
             _hdr(ws, row, 10, "Resultado")
             row += 1
-            prep_u = U.standard_preparation_uncertainty(compound.standard_preparation)
             u_vm = U.volumetric_step_uncertainty(compound.volumen_muestra) if compound.volumen_muestra else None
             u_vm_rel = u_vm.u_relativa if u_vm else 0.0
             all_lv_e = [c.levels_nominal for c in compound.calibration_curves if any(c.responses)]
@@ -444,6 +461,10 @@ def build_verification_excel(project: VerificationProject, out_path: str = "data
                     continue
                 flat = [v for day in lvl.values for v in day]
                 if not any(flat):
+                    continue
+                try:
+                    prep_u = U.standard_preparation_uncertainty_at(compound.standard_preparation, nominal)
+                except Exception:
                     continue
                 try:
                     prec = S.repeatability_intermediate_precision(lvl.values)
