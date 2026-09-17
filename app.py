@@ -23,6 +23,37 @@ from core import uncertainty as U
 
 st.set_page_config(page_title="Verificación de Métodos + Incertidumbre", layout="wide")
 
+# =============================================================================
+# Control de acceso a la descarga (solo administrador)
+#
+# Usa el mismo mecanismo de acceso de Streamlit Community Cloud (Settings >
+# Sharing > "Only specific people can view this app"): cuando está activo,
+# la plataforma identifica al usuario que inició sesión con Google y lo
+# expone aquí en `st.user`. No requiere crear ningún proyecto aparte en
+# Google Cloud Console. En local (sin ese login), no hay `st.user` con
+# email, así que se trata como "no administrador" — pero se puede probar
+# forzando ADMIN_EMAILS a tu correo en local si lo necesitas.
+# =============================================================================
+try:
+    ADMIN_EMAILS = list(st.secrets.get("admin_emails", ["consultorabril1215@gmail.com"]))
+except Exception:
+    ADMIN_EMAILS = ["consultorabril1215@gmail.com"]
+
+
+def get_viewer_email() -> str | None:
+    try:
+        u = st.user
+        if getattr(u, "is_logged_in", True) is False:
+            return None
+        return getattr(u, "email", None)
+    except Exception:
+        return None
+
+
+def is_admin_user() -> bool:
+    email = get_viewer_email()
+    return bool(email) and email.lower() in [e.lower() for e in ADMIN_EMAILS]
+
 
 # =============================================================================
 # Estado de la aplicación
@@ -322,8 +353,9 @@ elif page.startswith("3"):
     # --- Curvas de calibración ---
     with tabs[0]:
         st.caption(
-            f"Ingresa {project.design.n_dias} curvas (una por día), con {project.design.n_niveles_curva} "
-            "niveles cada una. La concentración nominal debe ser igual entre curvas (mismo diseño)."
+            f"{project.design.n_dias} curvas (una por día), {project.design.n_niveles_curva} niveles cada una. "
+            "💡 Puedes **copiar un bloque de celdas desde Excel** (columna de niveles + una columna por curva) "
+            "y pegarlo aquí: haz clic en la primera celda de la tabla y presiona Ctrl+V."
         )
         if not compound.calibration_curves:
             compound.calibration_curves = [
@@ -331,16 +363,70 @@ elif page.startswith("3"):
                                   responses=[0.0] * project.design.n_niveles_curva)
                 for _ in range(project.design.n_dias)
             ]
+        n_niv = project.design.n_niveles_curva
+        wide = {"nivel_nominal": compound.calibration_curves[0].levels_nominal[:n_niv]}
         for i, curve in enumerate(compound.calibration_curves):
-            st.markdown(f"**Curva / Día {i + 1}**")
-            df = pd.DataFrame({"nivel_nominal": curve.levels_nominal, "respuesta": curve.responses})
-            df_edit = st.data_editor(df, key=f"curve_{compound.nombre}_{i}", num_rows="fixed")
-            curve.levels_nominal = df_edit["nivel_nominal"].tolist()
-            curve.responses = df_edit["respuesta"].tolist()
-            curve.retention_time_min = st.number_input(
-                f"Tiempo de retención curva {i + 1} (min)", 0.0, key=f"rt_{compound.nombre}_{i}",
-                value=curve.retention_time_min or 0.0,
-            )
+            wide[f"Curva {i + 1} (día {i + 1})"] = curve.responses[:n_niv]
+        df_wide = pd.DataFrame(wide)
+        df_edit = st.data_editor(df_wide, key=f"curves_wide_{compound.nombre}", num_rows="fixed",
+                                  use_container_width=True)
+        levels_col = df_edit["nivel_nominal"].tolist()
+        for i, curve in enumerate(compound.calibration_curves):
+            curve.levels_nominal = levels_col
+            curve.responses = df_edit[f"Curva {i + 1} (día {i + 1})"].tolist()
+
+        rt_cols = st.columns(len(compound.calibration_curves))
+        for i, (curve, col) in enumerate(zip(compound.calibration_curves, rt_cols)):
+            with col:
+                curve.retention_time_min = st.number_input(
+                    f"T. retención curva {i + 1} (min)", 0.0, key=f"rt_{compound.nombre}_{i}",
+                    value=curve.retention_time_min or 0.0,
+                )
+
+        st.divider()
+        st.markdown("#### Pruebas estadísticas de la curva (ISO 8466-1:1990, decisión del modelo)")
+        try:
+            all_lv = [c.levels_nominal for c in compound.calibration_curves if any(c.responses)]
+            all_rs = [c.responses for c in compound.calibration_curves if any(c.responses)]
+            if len(all_lv) >= 2 and all(len(l) >= 4 for l in all_lv):
+                cal = S.analyze_calibration(all_lv, all_rs, project.criteria.r_min)
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**1. Homogeneidad de varianzas (§4.1.2)**")
+                    st.write(f"Fcalc = {cal.homogeneidad.f_calc:.3f}  |  Fcrit(99%) = {cal.homogeneidad.f_crit:.3f}")
+                    alert(cal.homogeneidad.homogenea, cal.homogeneidad.decision, cal.homogeneidad.decision)
+                with c2:
+                    st.markdown("**2. Linealidad — prueba de Mandel (§4.1.3)**")
+                    st.write(f"PG = {cal.linealidad_mandel.pg:.4f}  |  Fcrit(99%) = {cal.linealidad_mandel.f_crit:.3f}")
+                    alert(cal.linealidad_mandel.es_lineal, cal.linealidad_mandel.decision, cal.linealidad_mandel.decision)
+
+                st.info(f"**Modelo aplicado: regresión {cal.modelo_usado}**  →  "
+                        f"pendiente = {cal.slope:.5f}, intercepto = {cal.intercept:.5f}, r = {cal.r:.5f}, r² = {cal.r2:.5f}")
+                alert(cal.cumple_r, f"Cumple r ≥ {project.criteria.r_min}", f"NO cumple r ≥ {project.criteria.r_min}")
+
+                df_pts = pd.DataFrame({
+                    "Nivel nominal": cal.puntos_x, "Respuesta": cal.puntos_y,
+                    "Residual (señal)": [round(v, 5) for v in cal.residuales],
+                    "Conc. recalculada": [round(v, 5) for v in cal.x_recalculada],
+                    "% Error": [round(v, 2) for v in cal.error_percent],
+                })
+                st.dataframe(df_pts, use_container_width=True)
+                st.markdown("**Gráfica de residuales**")
+                st.scatter_chart(df_pts, x="Nivel nominal", y="Residual (señal)")
+
+                st.markdown("**Datos atípicos por nivel (Dixon/Grubbs automático según n)**")
+                niveles_unicos = sorted(set(cal.puntos_x))
+                for lvl in niveles_unicos:
+                    vals = [y for x, y in zip(cal.puntos_x, cal.puntos_y) if x == lvl]
+                    if len(vals) >= 3:
+                        ot = S.outlier_test_auto(vals, project.criteria.grubbs_alpha)
+                        ok = not ot.hay_atipico
+                        alert(ok, f"Nivel {lvl}: sin atípicos ({ot.prueba_usada}, n={ot.n})",
+                              f"Nivel {lvl}: POSIBLE ATÍPICO ({ot.prueba_usada}, n={ot.n}, crítico={ot.valor_critico})")
+            else:
+                st.caption("Ingresa datos en al menos 2 curvas (mín. 4 niveles) para calcular las pruebas.")
+        except Exception as e:
+            st.warning(f"No se pudo completar el análisis de la curva: {e}")
 
     grupo_labels = [f"Día {g['dia']} — {g['analista']}" for g in project.design.grupos]
 
@@ -504,33 +590,37 @@ elif page.startswith("4"):
     for compound in project.compounds:
         st.subheader(compound.nombre)
 
-        # --- Linealidad ---
-        all_levels, all_responses = [], []
-        for curve in compound.calibration_curves:
-            all_levels += curve.levels_nominal
-            all_responses += curve.responses
-        if all_levels and any(all_responses):
+        # --- Linealidad (con decisión ISO 8466-1 Simple/Ponderada) ---
+        all_lv = [c.levels_nominal for c in compound.calibration_curves if any(c.responses)]
+        all_rs = [c.responses for c in compound.calibration_curves if any(c.responses)]
+        cal = None
+        if len(all_lv) >= 2 and all(len(l) >= 4 for l in all_lv):
             try:
-                lin = S.linearity(all_levels, all_responses, crit.r_min)
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Pendiente", f"{lin.slope:.4f}")
-                c2.metric("Intercepto", f"{lin.intercept:.4f}")
-                c3.metric("r", f"{lin.r:.5f}")
-                alert(lin.cumple_r, f"Cumple r ≥ {crit.r_min}", f"NO cumple r ≥ {crit.r_min} (r={lin.r:.5f})")
+                cal = S.analyze_calibration(all_lv, all_rs, crit.r_min)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Modelo", cal.modelo_usado)
+                c2.metric("Pendiente", f"{cal.slope:.4f}")
+                c3.metric("Intercepto", f"{cal.intercept:.4f}")
+                c4.metric("r", f"{cal.r:.5f}")
+                alert(cal.cumple_r, f"Cumple r ≥ {crit.r_min}", f"NO cumple r ≥ {crit.r_min} (r={cal.r:.5f})")
+                alert(cal.homogeneidad.homogenea, "Homogeneidad de varianzas: OK (§4.1.2)",
+                      "NO homogénea — se aplicó regresión PONDERADA (§4.1.2)")
+                alert(cal.linealidad_mandel.es_lineal, "Linealidad confirmada (Mandel §4.1.3)",
+                      "Mandel indica NO linealidad — revisar rango de trabajo")
             except Exception as e:
                 st.warning(f"No se pudo calcular linealidad: {e}")
 
-        # --- Grubbs por nivel de calibración (a través de las curvas) ---
-        niveles_unicos = sorted(set(all_levels)) if all_levels else []
-        with st.expander("Prueba de Grubbs (linealidad, por nivel)"):
-            for lvl in niveles_unicos:
-                vals = [curve.responses[curve.levels_nominal.index(lvl)] for curve in compound.calibration_curves
-                        if lvl in curve.levels_nominal]
-                if len(vals) >= 3:
-                    g = S.grubbs_test(vals, crit.grubbs_alpha)
-                    ok = not (g.hay_atipico_bajo or g.hay_atipico_alto)
-                    alert(ok, f"Nivel {lvl}: sin datos atípicos (Gcrit={g.g_critico})",
-                          f"Nivel {lvl}: POSIBLE DATO ATÍPICO (Gbajo={g.g_bajo:.2f}, Galto={g.g_alto:.2f}, Gcrit={g.g_critico})")
+        # --- Datos atípicos por nivel de calibración (Dixon/Grubbs automático) ---
+        with st.expander("Datos atípicos en la curva (Dixon/Grubbs automático por nivel)"):
+            if cal:
+                niveles_unicos = sorted(set(cal.puntos_x))
+                for lvl in niveles_unicos:
+                    vals = [y for x, y in zip(cal.puntos_x, cal.puntos_y) if x == lvl]
+                    if len(vals) >= 3:
+                        ot = S.outlier_test_auto(vals, crit.grubbs_alpha)
+                        ok = not ot.hay_atipico
+                        alert(ok, f"Nivel {lvl}: sin atípicos ({ot.prueba_usada}, n={ot.n})",
+                              f"Nivel {lvl}: POSIBLE ATÍPICO ({ot.prueba_usada}, n={ot.n}, crítico={ot.valor_critico})")
 
         # --- LC / LS / muestras: descriptivos + veracidad + precisión ---
         for lvl in compound.replicate_levels:
@@ -575,10 +665,11 @@ elif page.startswith("4"):
                 except Exception as e:
                     st.caption(f"(No se pudo calcular ANOVA de precisión: {e})")
 
-            g = S.grubbs_test(flat, crit.grubbs_alpha)
-            ok = not (g.hay_atipico_bajo or g.hay_atipico_alto)
-            alert(ok, "Sin datos atípicos (Grubbs)",
-                  f"POSIBLE DATO ATÍPICO — Gbajo={g.g_bajo:.2f}, Galto={g.g_alto:.2f}, Gcrit={g.g_critico}")
+            ot = S.outlier_test_auto(flat, crit.grubbs_alpha)
+            alert(not ot.hay_atipico, f"Sin datos atípicos ({ot.prueba_usada}, n={ot.n})",
+                  f"POSIBLE DATO ATÍPICO — prueba {ot.prueba_usada} (n={ot.n}, "
+                  f"estadístico bajo={ot.estadistico_bajo:.3f}, alto={ot.estadistico_alto:.3f}, "
+                  f"crítico={ot.valor_critico})")
             st.divider()
 
 
@@ -624,18 +715,16 @@ elif page.startswith("5"):
                 pass
             u_repeat_rel = (prec.si / (sum(flat) / len(flat))) if prec and sum(flat) else 0.0
 
-            # incertidumbre de la respuesta de la curva (Ec. E3.5)
-            all_levels, all_resid = [], []
-            for curve in compound.calibration_curves:
-                if not curve.levels_nominal:
-                    continue
-                lin = S.linearity(curve.levels_nominal, curve.responses, project.criteria.r_min)
-                res_y = S.residuals(curve.levels_nominal, curve.responses, lin.slope, lin.intercept)
-                res_x = [r / lin.slope for r in res_y]
-                all_levels += curve.levels_nominal
-                all_resid += res_x
+            # incertidumbre de la respuesta de la curva (Ec. E3.4/E3.5), usando
+            # el MISMO modelo (simple/ponderado) decidido por ISO 8466-1 en la
+            # pestaña de curvas — un solo ajuste agrupando todas las curvas,
+            # no un ajuste distinto por curva.
+            all_lv_u = [c.levels_nominal for c in compound.calibration_curves if any(c.responses)]
+            all_rs_u = [c.responses for c in compound.calibration_curves if any(c.responses)]
             try:
-                u_cal_abs = U.calibration_response_uncertainty(all_levels, all_resid, nominal)
+                cal_u = S.analyze_calibration(all_lv_u, all_rs_u, project.criteria.r_min)
+                res_x = [r / cal_u.slope for r in cal_u.residuales]
+                u_cal_abs = U.calibration_response_uncertainty(cal_u.puntos_x, res_x, nominal)
                 u_cal_rel = u_cal_abs / nominal if nominal else 0.0
             except Exception as e:
                 u_cal_rel = 0.0
@@ -681,7 +770,24 @@ elif page.startswith("5"):
 # =============================================================================
 elif page.startswith("6"):
     st.header("6. Exportar resultados")
-    st.caption("Genera el Excel de verificación (con alertas visuales) y el informe PDF unificado.")
+
+    if not is_admin_user():
+        st.warning(
+            "🔒 La descarga de archivos está reservada al administrador del sistema. "
+            "Puedes revisar todos los resultados y alertas en la Sección 4 (Resultados de "
+            "verificación) y Sección 5 (Incertidumbre) — solo la exportación a Excel/PDF está "
+            "restringida."
+        )
+        viewer = get_viewer_email()
+        if viewer:
+            st.caption(f"Conectado como: {viewer}")
+        st.stop()
+
+    st.caption(
+        "Genera el Excel de verificación (con fórmulas vivas, no solo valores — para que un "
+        "auditor pueda revisar el detalle del cálculo directamente en el archivo) y el informe "
+        "PDF unificado."
+    )
 
     c1, c2 = st.columns(2)
     with c1:
