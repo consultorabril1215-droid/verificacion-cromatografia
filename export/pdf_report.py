@@ -206,10 +206,9 @@ def build_pdf_report(project: VerificationProject, out_path: str = "data/Informe
                 except Exception:
                     u_rep_rel = 0.0
                 try:
-                    if cal_p is None:
-                        raise ValueError("Sin modelo de calibración calculado")
-                    res_x = [r / cal_p.slope for r in cal_p.residuales]
-                    u_cal_abs = U.calibration_response_uncertainty(cal_p.puntos_x, res_x, nominal)
+                    u_cal_abs = U.calibration_response_uncertainty_averaged_curves(
+                        all_lv_p, all_rs_p, nominal, p_replicas=project.design.n_replicas_total
+                    )
                     u_cal_rel = u_cal_abs / nominal if nominal else 0.0
                 except Exception:
                     u_cal_rel = 0.0
