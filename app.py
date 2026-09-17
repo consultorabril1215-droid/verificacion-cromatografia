@@ -41,13 +41,22 @@ except Exception:
 
 
 def get_viewer_email() -> str | None:
-    try:
-        u = st.user
-        if getattr(u, "is_logged_in", True) is False:
-            return None
-        return getattr(u, "email", None)
-    except Exception:
-        return None
+    # Prueba primero la API moderna (st.user), y si no existe o no trae
+    # email, cae a la API antigua (st.experimental_user) — cubre distintas
+    # versiones de Streamlit que puede tener instaladas Community Cloud.
+    for accessor in ("user", "experimental_user"):
+        try:
+            u = getattr(st, accessor, None)
+            if u is None:
+                continue
+            if getattr(u, "is_logged_in", True) is False:
+                continue
+            email = getattr(u, "email", None)
+            if email:
+                return email
+        except Exception:
+            continue
+    return None
 
 
 def is_admin_user() -> bool:
