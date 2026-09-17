@@ -82,6 +82,41 @@ _init_state()
 project: VerificationProject = st.session_state.project
 
 
+def to_float(val) -> float:
+    """Convierte un valor pegado/escrito en la grilla a número, aceptando
+    tanto coma decimal (configuración regional de Excel en Colombia, p.ej.
+    "0,1001") como punto decimal ("0.1001"), y también miles con el
+    separador contrario (p.ej. "1.234,56" o "1,234.56")."""
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    if not s:
+        return 0.0
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".") if s.rfind(",") > s.rfind(".") else s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def numeric_data_editor(df: pd.DataFrame, numeric_cols: list[str], **kwargs) -> pd.DataFrame:
+    """Envuelve st.data_editor para que las columnas numéricas se editen como
+    texto (así el pegado desde Excel con coma decimal no se rechaza ni se
+    trunca) y devuelve el DataFrame ya con esas columnas convertidas a float."""
+    df_txt = df.copy()
+    for c in numeric_cols:
+        df_txt[c] = df_txt[c].apply(lambda v: "" if v is None else str(v))
+    df_edit = st.data_editor(df_txt, **kwargs)
+    for c in numeric_cols:
+        df_edit[c] = df_edit[c].apply(to_float)
+    return df_edit
+
+
 def alert(ok: bool, texto_ok: str, texto_fail: str):
     if ok:
         st.success(f"✅ {texto_ok}")
@@ -104,7 +139,7 @@ def render_design_panel(design):
              "Réplicas que debe generar": design.replicas_por_grupo}
             for i, g in enumerate(design.grupos)
         ]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Grupos totales", design.n_grupos)
         c2.metric("Réplicas totales / nivel", design.n_replicas_total)
@@ -144,14 +179,14 @@ try:
     if drive_configured():
         if "last_saved" not in st.session_state:
             st.session_state.last_saved = None
-        if st.sidebar.button("💾 Guardar en Drive", use_container_width=True):
+        if st.sidebar.button("💾 Guardar en Drive", width='stretch'):
             try:
                 save_project_to_drive(project)
                 st.session_state.last_saved = "ahora mismo"
                 st.sidebar.success("Guardado.")
             except Exception as e:
                 st.sidebar.error(f"No se pudo guardar: {e}")
-        if st.sidebar.button("📥 Cargar último guardado", use_container_width=True):
+        if st.sidebar.button("📥 Cargar último guardado", width='stretch'):
             try:
                 loaded, modified = load_project_from_drive()
                 if loaded is None:
@@ -361,7 +396,7 @@ elif page.startswith("2"):
                 }
                 for a in cert.analitos
             ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), width='stretch')
 
 
 # =============================================================================
@@ -415,8 +450,9 @@ elif page.startswith("3"):
         for i, curve in enumerate(compound.calibration_curves):
             wide[f"Curva {i + 1} (día {i + 1})"] = curve.responses[:n_niv]
         df_wide = pd.DataFrame(wide)
-        df_edit = st.data_editor(df_wide, key=f"curves_wide_{compound.nombre}", num_rows="fixed",
-                                  use_container_width=True)
+        df_edit = numeric_data_editor(df_wide, list(wide.keys()),
+                                       key=f"curves_wide_{compound.nombre}", num_rows="fixed",
+                                       width='stretch')
         levels_col = df_edit["nivel_nominal"].tolist()
         for i, curve in enumerate(compound.calibration_curves):
             curve.levels_nominal = levels_col
@@ -457,7 +493,7 @@ elif page.startswith("3"):
                     "Conc. recalculada": [round(v, 5) for v in cal.x_recalculada],
                     "% Error": [round(v, 2) for v in cal.error_percent],
                 })
-                st.dataframe(df_pts, use_container_width=True)
+                st.dataframe(df_pts, width='stretch')
                 st.markdown("**Gráfica de residuales**")
                 st.scatter_chart(df_pts, x="Nivel nominal", y="Residual (señal)")
 
@@ -495,7 +531,7 @@ elif page.startswith("3"):
             st.markdown(f"**{label}** (nominal = {existing.nominal})")
             cols_labels = [f"Rep {j+1}" for j in range(project.design.replicas_por_grupo)]
             df = pd.DataFrame(existing.values, columns=cols_labels, index=grupo_labels)
-            df_edit = st.data_editor(df, key=f"level_{compound.nombre}_{label}")
+            df_edit = numeric_data_editor(df, cols_labels, key=f"level_{compound.nombre}_{label}")
             existing.values = df_edit.values.tolist()
 
     # --- Muestras ---
@@ -523,7 +559,7 @@ elif page.startswith("3"):
             st.markdown(f"**{lvl.label}** (nominal = {lvl.nominal})")
             cols_labels = [f"Rep {j+1}" for j in range(project.design.replicas_por_grupo)]
             df = pd.DataFrame(lvl.values, columns=cols_labels, index=grupo_labels)
-            df_edit = st.data_editor(df, key=f"sample_{compound.nombre}_{lvl.label}")
+            df_edit = numeric_data_editor(df, cols_labels, key=f"sample_{compound.nombre}_{lvl.label}")
             lvl.values = df_edit.values.tolist()
 
     # --- Ventanas de retención ---
@@ -793,7 +829,7 @@ elif page.startswith("5"):
                 "U expandida (abs)": round(b.u_expandida, 5),
                 "U relativa (%)": round(b.u_relativa_expandida_percent, 2),
             } for b in budget_levels])
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width='stretch')
 
             if len(budget_levels) >= 2:
                 model = U.fit_level_dependent_model(budget_levels)
