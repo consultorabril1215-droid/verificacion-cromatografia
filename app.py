@@ -17,6 +17,7 @@ from core.models import (
     AcceptanceCriteria, MethodInfo, DesignStructure, Compound,
     CalibrationCurve, ReplicateLevel, CertificateRecord, CertificateAnalyte,
     ReferenceMaterialCert, VolumetricStep, StandardPreparation, VerificationProject,
+    DilutionLevel, VolumetricEquipmentRecord,
 )
 from core import stats as S
 from core import uncertainty as U
@@ -286,6 +287,9 @@ if page.startswith("1"):
             project.criteria.cv_max_percent = st.number_input(
                 "CV% máximo (precisión)", 0.0, 100.0, project.criteria.cv_max_percent
             )
+            project.criteria.error_rel_max_percent = st.number_input(
+                "% Error máximo por punto de la curva", 0.0, 100.0, project.criteria.error_rel_max_percent
+            )
         with e2:
             project.criteria.recovery_lc_min = st.number_input(
                 "Recuperación mín. en LC (%)", 0.0, 200.0, project.criteria.recovery_lc_min
@@ -329,92 +333,141 @@ if page.startswith("1"):
 # 2. Certificados de materiales de referencia
 # =============================================================================
 elif page.startswith("2"):
-    st.header("2. Registro de certificados de materiales de referencia (MRC)")
-    st.caption(
-        "Registra aquí cada certificado de proveedor UNA vez (puede contener varios compuestos, "
-        "como un estándar mezcla). Luego se reutiliza al configurar cada compuesto, sin necesidad "
-        "de volver a digitar los datos si vienen del mismo certificado/lote."
-    )
+    st.header("2. Certificados y material volumétrico")
+    tab_cert, tab_equip = st.tabs(["📜 Certificados de MRC", "🧪 Material volumétrico (Hoja M)"])
 
-    with st.expander("➕ Registrar nuevo certificado", expanded=len(project.certificates) == 0):
-        with st.form("form_cert"):
-            c1, c2 = st.columns(2)
-            with c1:
-                proveedor = st.text_input("Proveedor", "Absolute Standards, Inc.")
-                numero_parte = st.text_input("Número de parte (Part Number)")
-                numero_lote = st.text_input("Número de lote (Lot Number)")
-                descripcion = st.text_input("Descripción")
-                fecha_expiracion = st.text_input("Fecha de expiración")
-            with c2:
-                solvente = st.text_input("Solvente")
-                volumen_disolucion = st.number_input("Volumen de disolución (mL)", 0.0, 10000.0, 0.0)
-                norma_acreditacion = st.text_input("Acreditación del proveedor", "ANAB ISO 17034")
-                referencia_trazabilidad = st.text_input(
-                    "Referencia de trazabilidad", "NIST Technical Note 1297"
-                )
-            archivo = st.file_uploader("Adjuntar PDF del certificado (opcional, queda como soporte)", type=["pdf"])
+    with tab_cert:
+        st.caption(
+            "Registra aquí cada certificado de proveedor UNA vez (puede contener varios compuestos, "
+            "como un estándar mezcla, o el estándar subrogado). Luego se reutiliza al configurar cada "
+            "compuesto, sin necesidad de volver a digitar los datos si vienen del mismo certificado/lote."
+        )
 
-            st.markdown("**Analitos certificados en este documento** (una fila por compuesto)")
-            df_default = pd.DataFrame(
-                [{"compuesto": "", "conc_nominal": 0.0, "conc_real": 0.0, "unidad": "µg/mL",
-                  "U_expandida": 0.0, "k_certificado": 2.0, "k_asumido": True,
-                  "pureza_%": None, "U_pureza_%": None}]
-            )
-            df_analitos = st.data_editor(df_default, num_rows="dynamic", key="cert_analitos_editor")
-
-            if st.form_submit_button("Guardar certificado", type="primary"):
-                analitos = [
-                    CertificateAnalyte(
-                        nombre_compuesto=row["compuesto"],
-                        concentracion_nominal=row["conc_nominal"] or 0.0,
-                        concentracion_real=row["conc_real"] or 0.0,
-                        unidad=row["unidad"] or "µg/mL",
-                        incertidumbre_expandida=row["U_expandida"],
-                        k_certificado=row["k_certificado"] or 2.0,
-                        k_supuesto=bool(row["k_asumido"]),
-                        pureza_percent=row["pureza_%"],
-                        incertidumbre_pureza_percent=row["U_pureza_%"],
+        with st.expander("➕ Registrar nuevo certificado", expanded=len(project.certificates) == 0):
+            with st.form("form_cert"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    proveedor = st.text_input("Proveedor", "Absolute Standards, Inc.")
+                    numero_parte = st.text_input("Número de parte (Part Number)")
+                    numero_lote = st.text_input("Número de lote (Lot Number)")
+                    descripcion = st.text_input("Descripción")
+                    fecha_expiracion = st.text_input("Fecha de expiración")
+                with c2:
+                    solvente = st.text_input("Solvente")
+                    volumen_disolucion = st.number_input("Volumen de disolución (mL)", 0.0, 10000.0, 0.0)
+                    norma_acreditacion = st.text_input("Acreditación del proveedor", "ANAB ISO 17034")
+                    referencia_trazabilidad = st.text_input(
+                        "Referencia de trazabilidad", "NIST Technical Note 1297"
                     )
-                    for _, row in df_analitos.iterrows() if row["compuesto"]
+                archivo = st.file_uploader("Adjuntar PDF del certificado (opcional, queda como soporte)", type=["pdf"])
+
+                st.markdown("**Analitos certificados en este documento** (una fila por compuesto — incluye el "
+                            "subrogado si su certificado es el mismo documento)")
+                df_default = pd.DataFrame(
+                    [{"compuesto": "", "conc_nominal": 0.0, "conc_real": 0.0, "unidad": "µg/mL",
+                      "U_expandida": 0.0, "k_certificado": 2.0, "k_asumido": True,
+                      "pureza_%": None, "U_pureza_%": None}]
+                )
+                df_analitos = st.data_editor(df_default, num_rows="dynamic", key="cert_analitos_editor")
+
+                if st.form_submit_button("Guardar certificado", type="primary"):
+                    analitos = [
+                        CertificateAnalyte(
+                            nombre_compuesto=row["compuesto"],
+                            concentracion_nominal=row["conc_nominal"] or 0.0,
+                            concentracion_real=row["conc_real"] or 0.0,
+                            unidad=row["unidad"] or "µg/mL",
+                            incertidumbre_expandida=row["U_expandida"],
+                            k_certificado=row["k_certificado"] or 2.0,
+                            k_supuesto=bool(row["k_asumido"]),
+                            pureza_percent=row["pureza_%"],
+                            incertidumbre_pureza_percent=row["U_pureza_%"],
+                        )
+                        for _, row in df_analitos.iterrows() if row["compuesto"]
+                    ]
+                    pdf_path = ""
+                    if archivo is not None:
+                        pdf_path = f"data/certificados/{numero_parte}_{numero_lote}_{archivo.name}"
+                        import os
+                        os.makedirs("data/certificados", exist_ok=True)
+                        with open(pdf_path, "wb") as f:
+                            f.write(archivo.getbuffer())
+                    project.certificates.append(
+                        CertificateRecord(
+                            proveedor=proveedor, numero_parte=numero_parte, numero_lote=numero_lote,
+                            descripcion=descripcion, fecha_expiracion=fecha_expiracion, solvente=solvente,
+                            volumen_disolucion_ml=volumen_disolucion, norma_acreditacion=norma_acreditacion,
+                            referencia_trazabilidad=referencia_trazabilidad, archivo_pdf_path=pdf_path,
+                            analitos=analitos,
+                        )
+                    )
+                    st.success("Certificado guardado.")
+                    st.rerun()
+
+        st.subheader("Certificados registrados")
+        if not project.certificates:
+            st.info("Aún no hay certificados registrados.")
+        for cert in project.certificates:
+            with st.expander(f"{cert.proveedor} — Parte {cert.numero_parte}, Lote {cert.numero_lote}"):
+                st.write(f"**Descripción:** {cert.descripcion}  |  **Vence:** {cert.fecha_expiracion}")
+                st.write(f"**Trazabilidad:** {cert.referencia_trazabilidad}  |  **Acreditación:** {cert.norma_acreditacion}")
+                if cert.archivo_pdf_path:
+                    st.write(f"📎 PDF adjunto: `{cert.archivo_pdf_path}`")
+                rows = [
+                    {
+                        "Compuesto": a.nombre_compuesto, "Conc. real": a.concentracion_real, "Unidad": a.unidad,
+                        "U expandida": a.incertidumbre_expandida, "k": a.k_certificado,
+                        "k asumido": "Sí" if a.k_supuesto else "No (del certificado)",
+                        "Pureza %": a.pureza_percent, "U pureza %": a.incertidumbre_pureza_percent,
+                    }
+                    for a in cert.analitos
                 ]
-                pdf_path = ""
-                if archivo is not None:
-                    pdf_path = f"data/certificados/{numero_parte}_{numero_lote}_{archivo.name}"
-                    import os
-                    os.makedirs("data/certificados", exist_ok=True)
-                    with open(pdf_path, "wb") as f:
-                        f.write(archivo.getbuffer())
-                project.certificates.append(
-                    CertificateRecord(
-                        proveedor=proveedor, numero_parte=numero_parte, numero_lote=numero_lote,
-                        descripcion=descripcion, fecha_expiracion=fecha_expiracion, solvente=solvente,
-                        volumen_disolucion_ml=volumen_disolucion, norma_acreditacion=norma_acreditacion,
-                        referencia_trazabilidad=referencia_trazabilidad, archivo_pdf_path=pdf_path,
-                        analitos=analitos,
-                    )
-                )
-                st.success("Certificado guardado.")
-                st.rerun()
+                st.dataframe(pd.DataFrame(rows), width='stretch')
 
-    st.subheader("Certificados registrados")
-    if not project.certificates:
-        st.info("Aún no hay certificados registrados.")
-    for cert in project.certificates:
-        with st.expander(f"{cert.proveedor} — Parte {cert.numero_parte}, Lote {cert.numero_lote}"):
-            st.write(f"**Descripción:** {cert.descripcion}  |  **Vence:** {cert.fecha_expiracion}")
-            st.write(f"**Trazabilidad:** {cert.referencia_trazabilidad}  |  **Acreditación:** {cert.norma_acreditacion}")
-            if cert.archivo_pdf_path:
-                st.write(f"📎 PDF adjunto: `{cert.archivo_pdf_path}`")
-            rows = [
-                {
-                    "Compuesto": a.nombre_compuesto, "Conc. real": a.concentracion_real, "Unidad": a.unidad,
-                    "U expandida": a.incertidumbre_expandida, "k": a.k_certificado,
-                    "k asumido": "Sí" if a.k_supuesto else "No (del certificado)",
-                    "Pureza %": a.pureza_percent, "U pureza %": a.incertidumbre_pureza_percent,
-                }
-                for a in cert.analitos
+    with tab_equip:
+        st.caption(
+            "Registro de material volumétrico (pipetas, balones aforados, etc.) — equivalente a tu "
+            "'Hoja M'. Regístralo UNA vez por instrumento; luego lo seleccionas por nombre al armar la "
+            "dilución de cada compuesto, sin digitar los valores de nuevo."
+        )
+        df_eq_default = pd.DataFrame(
+            [{"nombre": e.nombre, "tipo": e.tipo, "clase": e.clase, "capacidad_nominal": e.capacidad_nominal,
+              "codigo_interno": e.codigo_interno, "tiene_certificado_calibracion": e.tiene_certificado_calibracion,
+              "incertidumbre_certificado": e.incertidumbre_certificado, "k_certificado": e.k_certificado,
+              "fecha_calibracion": e.fecha_calibracion, "tolerancia_fabricante": e.tolerancia_fabricante,
+              "sd_repetibilidad": e.sd_repetibilidad, "n_repetibilidad": e.n_repetibilidad}
+             for e in project.equipment] or
+            [{"nombre": "", "tipo": "Pipeta", "clase": "A", "capacidad_nominal": 0.0,
+              "codigo_interno": "", "tiene_certificado_calibracion": False,
+              "incertidumbre_certificado": None, "k_certificado": 2.0,
+              "fecha_calibracion": "", "tolerancia_fabricante": None,
+              "sd_repetibilidad": None, "n_repetibilidad": 10}]
+        )
+        df_eq = st.data_editor(
+            df_eq_default, num_rows="dynamic", key="equipment_editor", width='stretch',
+            column_config={
+                "tipo": st.column_config.SelectboxColumn(options=["Pipeta", "Balón aforado", "Probeta", "Jeringa", "Otro"]),
+                "clase": st.column_config.SelectboxColumn(options=["A", "B", "A/S", "N/A"]),
+            },
+        )
+        if st.button("💾 Guardar registro de material volumétrico", type="primary"):
+            project.equipment = [
+                VolumetricEquipmentRecord(
+                    nombre=r["nombre"], tipo=r.get("tipo") or "Pipeta", clase=r.get("clase") or "A",
+                    capacidad_nominal=to_float(r.get("capacidad_nominal")),
+                    codigo_interno=r.get("codigo_interno") or "",
+                    tiene_certificado_calibracion=bool(r.get("tiene_certificado_calibracion")),
+                    incertidumbre_certificado=to_float(r.get("incertidumbre_certificado")) or None,
+                    k_certificado=to_float(r.get("k_certificado")) or 2.0,
+                    fecha_calibracion=r.get("fecha_calibracion") or "",
+                    tolerancia_fabricante=to_float(r.get("tolerancia_fabricante")) or None,
+                    sd_repetibilidad=to_float(r.get("sd_repetibilidad")) or None,
+                    n_repetibilidad=int(r.get("n_repetibilidad") or 10),
+                )
+                for r in df_eq.to_dict("records") if r.get("nombre")
             ]
-            st.dataframe(pd.DataFrame(rows), width='stretch')
+            st.success(f"Guardado ({len(project.equipment)} instrumentos).")
+            st.rerun()
 
 
 # =============================================================================
@@ -476,21 +529,26 @@ elif page.startswith("3"):
             curve.levels_nominal = levels_col
             curve.responses = df_edit[f"Curva {i + 1} (día {i + 1})"].tolist()
 
+        analistas_opts = project.design.analistas or ["(sin asignar)"]
         rt_cols = st.columns(len(compound.calibration_curves))
         for i, (curve, col) in enumerate(zip(compound.calibration_curves, rt_cols)):
             with col:
+                curve.dia = i + 1
                 curve.retention_time_min = st.number_input(
                     f"T. retención curva {i + 1} (min)", 0.0, key=f"rt_{compound.nombre}_{i}",
                     value=curve.retention_time_min or 0.0,
+                )
+                idx_default = analistas_opts.index(curve.analista) if curve.analista in analistas_opts else 0
+                curve.analista = st.selectbox(
+                    f"Analista curva {i + 1}", analistas_opts, index=idx_default, key=f"analista_curva_{compound.nombre}_{i}"
                 )
 
         st.divider()
         st.markdown("#### Pruebas estadísticas de la curva (ISO 8466-1:1990, decisión del modelo)")
         try:
-            all_lv = [c.levels_nominal for c in compound.calibration_curves if any(c.responses)]
-            all_rs = [c.responses for c in compound.calibration_curves if any(c.responses)]
+            all_lv, all_rs, dias_c, analistas_c = compound.curve_arrays()
             if len(all_lv) >= 2 and all(len(l) >= 4 for l in all_lv):
-                cal = S.analyze_calibration(all_lv, all_rs, project.criteria.r_min)
+                cal = S.analyze_calibration(all_lv, all_rs, project.criteria.r_min, dias_c, analistas_c)
                 c1, c2 = st.columns(2)
                 with c1:
                     st.markdown("**1. Homogeneidad de varianzas (§4.1.2)**")
@@ -506,12 +564,29 @@ elif page.startswith("3"):
                 alert(cal.cumple_r, f"Cumple r ≥ {project.criteria.r_min}", f"NO cumple r ≥ {project.criteria.r_min}")
 
                 df_pts = pd.DataFrame({
+                    "Día": cal.dias, "Analista": cal.analistas,
                     "Nivel nominal": cal.puntos_x, "Respuesta": cal.puntos_y,
                     "Residual (señal)": [round(v, 5) for v in cal.residuales],
                     "Conc. recalculada": [round(v, 5) for v in cal.x_recalculada],
                     "% Error": [round(v, 2) for v in cal.error_percent],
                 })
-                st.dataframe(df_pts, width='stretch')
+                err_max = project.criteria.error_rel_max_percent
+                st.dataframe(
+                    df_pts.style.map(
+                        lambda v: "background-color:#FFC7CE" if isinstance(v, (int, float)) and abs(v) > err_max else "",
+                        subset=["% Error"],
+                    ),
+                    width='stretch',
+                )
+                puntos_excedidos = [
+                    (d, a, n, e) for d, a, n, e in zip(cal.dias, cal.analistas, cal.puntos_x, cal.error_percent)
+                    if abs(e) > err_max
+                ]
+                if puntos_excedidos:
+                    detalle = "; ".join(f"día {d} ({a or 's/analista'}), nivel {n}: {e:.1f}%" for d, a, n, e in puntos_excedidos)
+                    st.error(f"⚠️ {len(puntos_excedidos)} punto(s) de la curva exceden ±{err_max}% de error: {detalle}")
+                else:
+                    st.success(f"✅ Todos los puntos de la curva dentro de ±{err_max}% de error.")
                 st.markdown("**Gráfica de residuales**")
                 st.scatter_chart(df_pts, x="Nivel nominal", y="Residual (señal)")
 
@@ -622,7 +697,51 @@ elif page.startswith("3"):
 
     # --- Preparación del estándar (incertidumbre) ---
     with tabs[4]:
-        def render_standard_prep_ui(key_prefix: str, nombre_hint: str, default_steps: int = 2) -> StandardPreparation:
+        def render_volumetric_step_ui(key_prefix: str, descripcion: str, default_vol: float) -> VolumetricStep:
+            """Un volumen (alícuota o aforo): se selecciona el instrumento del
+            registro (Hoja M) o se digita manualmente si no está registrado."""
+            eq_options = ["(digitar manualmente)"] + [e.nombre for e in project.equipment]
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                vol = st.number_input(f"{descripcion} — volumen (mL)", 0.0, value=default_vol, format="%.4f",
+                                       key=f"vol_{key_prefix}")
+            with c2:
+                sel_eq = st.selectbox(f"{descripcion} — instrumento", eq_options, key=f"eq_{key_prefix}")
+
+            if sel_eq != "(digitar manualmente)":
+                eq = project.get_equipment(sel_eq)
+                st.caption(
+                    f"{eq.tipo} clase {eq.clase}, {eq.capacidad_nominal} mL  |  "
+                    + (f"U cert. ±{eq.incertidumbre_certificado} mL (k={eq.k_certificado})"
+                       if eq.tiene_certificado_calibracion else
+                       f"tolerancia ±{eq.tolerancia_fabricante} mL")
+                    + (f"  |  SD repetibilidad {eq.sd_repetibilidad} mL" if eq.sd_repetibilidad else "")
+                )
+                return VolumetricStep(
+                    descripcion=descripcion, volumen_nominal=vol or 1.0, instrumento=eq.nombre,
+                    equipment_record_id=eq.nombre,
+                    tiene_certificado_calibracion=eq.tiene_certificado_calibracion,
+                    incertidumbre_certificado=eq.incertidumbre_certificado, k_certificado=eq.k_certificado,
+                    tolerancia_fabricante=eq.tolerancia_fabricante, sd_repetibilidad=eq.sd_repetibilidad,
+                    n_repetibilidad=eq.n_repetibilidad,
+                )
+            c3, c4 = st.columns(2)
+            with c3:
+                tiene_cal = st.checkbox("Tiene certificado de calibración", key=f"stepcal_{key_prefix}")
+                u_cert = st.number_input("U del certificado (mL)", 0.0, key=f"stepUcert_{key_prefix}") if tiene_cal else None
+                k_cert = st.number_input("k del certificado", 1.0, 3.0, 2.0, key=f"stepk_{key_prefix}") if tiene_cal else 2.0
+                tol = None if tiene_cal else st.number_input(
+                    "Tolerancia de fabricante/clase (mL, semi-intervalo)", 0.0, key=f"steptol_{key_prefix}"
+                )
+            with c4:
+                sd_rep = st.number_input("SD de repetibilidad (mL, opcional)", 0.0, key=f"stepsd_{key_prefix}")
+            return VolumetricStep(
+                descripcion=descripcion, volumen_nominal=vol or 1.0,
+                tiene_certificado_calibracion=tiene_cal, incertidumbre_certificado=u_cert, k_certificado=k_cert,
+                tolerancia_fabricante=tol, sd_repetibilidad=sd_rep or None,
+            )
+
+        def render_standard_prep_ui(key_prefix: str, nombre_hint: str, niveles_ref: list[float]) -> StandardPreparation:
             cert_options = ["(sin certificado disponible)"] + [
                 f"{c.proveedor} | {c.numero_parte} | {c.numero_lote}" for c in project.certificates
             ]
@@ -660,42 +779,29 @@ elif page.startswith("3"):
                     "Mejor estimación de U disponible (hoja técnica, etc.)", 0.0, key=f"rmU_{key_prefix}"
                 )
 
-            st.markdown("**Pasos de dilución / preparación**")
-            n_steps = st.number_input("Número de pasos volumétricos", 0, 10, default_steps, key=f"nsteps_{key_prefix}")
-            steps = []
-            for i in range(int(n_steps)):
-                with st.container(border=True):
-                    st.write(f"Paso {i+1}")
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        desc = st.text_input("Descripción", key=f"stepdesc_{key_prefix}_{i}")
-                        vol = st.number_input("Volumen nominal (mL)", 0.0, key=f"stepvol_{key_prefix}_{i}")
-                        instr = st.text_input("Instrumento", key=f"stepinstr_{key_prefix}_{i}")
-                    with c2:
-                        tiene_cal = st.checkbox("Tiene certificado de calibración", key=f"stepcal_{key_prefix}_{i}")
-                        u_cert = st.number_input("U del certificado (mL)", 0.0, key=f"stepUcert_{key_prefix}_{i}") if tiene_cal else None
-                        k_cert = st.number_input("k del certificado", 1.0, 3.0, 2.0, key=f"stepk_{key_prefix}_{i}") if tiene_cal else 2.0
-                        tol = None if tiene_cal else st.number_input(
-                            "Tolerancia de fabricante/clase (mL, semi-intervalo)", 0.0, key=f"steptol_{key_prefix}_{i}"
-                        )
-                    with c3:
-                        sd_rep = st.number_input("SD de repetibilidad (mL, opcional)", 0.0, key=f"stepsd_{key_prefix}_{i}")
-                        incl_temp = st.checkbox("Incluir efecto de temperatura", value=True, key=f"steptemp_{key_prefix}_{i}")
-                        rango_t = st.number_input("Rango de temperatura ±°C", 0.0, 10.0, 3.0, key=f"stepdt_{key_prefix}_{i}")
-                    steps.append(VolumetricStep(
-                        descripcion=desc, volumen_nominal=vol or 1.0, instrumento=instr,
-                        tiene_certificado_calibracion=tiene_cal, incertidumbre_certificado=u_cert, k_certificado=k_cert,
-                        tolerancia_fabricante=tol, sd_repetibilidad=sd_rep or None,
-                        incluir_efecto_temperatura=incl_temp, rango_temperatura=rango_t,
+            st.markdown("**Esquema de dilución — un nivel por cada punto de la curva (Tabla 2)**")
+            niveles = []
+            for i, conc in enumerate(niveles_ref):
+                with st.expander(f"Nivel {i + 1} — {conc}", expanded=(i == 0)):
+                    alicuota = render_volumetric_step_ui(
+                        f"{key_prefix}_alic_{i}", f"Alícuota de MRC (nivel {i+1})", 0.005 * (i + 1)
+                    )
+                    aforo = render_volumetric_step_ui(
+                        f"{key_prefix}_aforo_{i}", f"Volumen de aforo (nivel {i+1})", 5.0
+                    )
+                    niveles.append(DilutionLevel(
+                        nivel_label=f"Nivel {i+1}", concentracion_nominal=conc, alicuota=alicuota, aforo=aforo,
                     ))
-            return StandardPreparation(reference_material=rm, steps=steps)
+            return StandardPreparation(reference_material=rm, dilution_levels=niveles)
 
         st.caption(
             "Desglose de la preparación del patrón del analito: material de referencia (certificado) + "
-            "pasos de dilución (pipeteo, aforo). Esto alimenta el módulo de incertidumbre del analito."
+            "esquema de dilución (alícuota + aforo) para CADA nivel de la curva. Esto alimenta la "
+            "incertidumbre de calibración de forma específica para LC y para LS (no un valor único)."
         )
-        default_n = len(compound.standard_preparation.steps) if compound.standard_preparation else 2
-        compound.standard_preparation = render_standard_prep_ui(compound.nombre, compound.nombre, default_n)
+        niveles_ref = compound.calibration_curves[0].levels_nominal if compound.calibration_curves else \
+            [compound.lc_nominal, compound.ls_nominal]
+        compound.standard_preparation = render_standard_prep_ui(compound.nombre, compound.nombre, niveles_ref)
 
         st.divider()
         st.markdown("### Estándar subrogado (también es un MRC — Tabla 1/2, LA-P-343/LA-P-340)")
@@ -709,9 +815,8 @@ elif page.startswith("3"):
         usa_subrogado = st.checkbox("Este compuesto usa estándar subrogado", value=compound.surrogate_preparation is not None,
                                      key=f"usasubrog_{compound.nombre}")
         if usa_subrogado:
-            default_n_sub = len(compound.surrogate_preparation.steps) if compound.surrogate_preparation else 1
             compound.surrogate_preparation = render_standard_prep_ui(
-                f"{compound.nombre}_subrogado", f"Subrogado ({compound.nombre})", default_n_sub
+                f"{compound.nombre}_subrogado", f"Subrogado ({compound.nombre})", niveles_ref
             )
         else:
             compound.surrogate_preparation = None
@@ -743,12 +848,11 @@ elif page.startswith("4"):
         st.subheader(compound.nombre)
 
         # --- Linealidad (con decisión ISO 8466-1 Simple/Ponderada) ---
-        all_lv = [c.levels_nominal for c in compound.calibration_curves if any(c.responses)]
-        all_rs = [c.responses for c in compound.calibration_curves if any(c.responses)]
+        all_lv, all_rs, dias_c, analistas_c = compound.curve_arrays()
         cal = None
         if len(all_lv) >= 2 and all(len(l) >= 4 for l in all_lv):
             try:
-                cal = S.analyze_calibration(all_lv, all_rs, crit.r_min)
+                cal = S.analyze_calibration(all_lv, all_rs, crit.r_min, dias_c, analistas_c)
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Modelo", cal.modelo_usado)
                 c2.metric("Pendiente", f"{cal.slope:.4f}")
@@ -759,6 +863,14 @@ elif page.startswith("4"):
                       "NO homogénea — se aplicó regresión PONDERADA (§4.1.2)")
                 alert(cal.linealidad_mandel.es_lineal, "Linealidad confirmada (Mandel §4.1.3)",
                       "Mandel indica NO linealidad — revisar rango de trabajo")
+                puntos_excedidos = [
+                    (d, a, n, e) for d, a, n, e in zip(cal.dias, cal.analistas, cal.puntos_x, cal.error_percent)
+                    if abs(e) > crit.error_rel_max_percent
+                ]
+                alert(not puntos_excedidos,
+                      f"Todos los puntos de la curva dentro de ±{crit.error_rel_max_percent}% de error",
+                      f"{len(puntos_excedidos)} punto(s) exceden ±{crit.error_rel_max_percent}%: " +
+                      "; ".join(f"día {d} ({a or 's/analista'}), nivel {n}: {e:.1f}%" for d, a, n, e in puntos_excedidos))
             except Exception as e:
                 st.warning(f"No se pudo calcular linealidad: {e}")
 
@@ -884,17 +996,10 @@ elif page.startswith("5"):
     k = project.criteria.k_coverage
     for compound in project.compounds:
         st.subheader(compound.nombre)
-        if compound.standard_preparation is None or not compound.standard_preparation.steps:
-            st.warning("Falta configurar la preparación del estándar en la sección 3 (pestaña de incertidumbre).")
+        if compound.standard_preparation is None or not compound.standard_preparation.dilution_levels:
+            st.warning("Falta configurar el esquema de dilución del estándar en la Sección 3 "
+                       "(pestaña 'Preparación del estándar').")
             continue
-
-        prep_u = U.standard_preparation_uncertainty(compound.standard_preparation)
-        st.write(f"**u relativa de preparación del estándar (uprep):** {prep_u.u_relativa_combinada:.5f}")
-        with st.expander("Detalle de la preparación"):
-            st.write(f"- u relativa por pureza del MRC: {prep_u.u_relativa_pureza:.5f}")
-            st.write(f"- u relativa por concentración certificada del MRC: {prep_u.u_relativa_certificado_mrc:.5f}")
-            for i, p in enumerate(prep_u.u_relativa_pasos):
-                st.write(f"- Paso {i+1}: u = {p.u_relativa:.5f}  ({p.fuente_calibracion})")
 
         u_vm = U.volumetric_step_uncertainty(compound.volumen_muestra) if compound.volumen_muestra else None
         u_vm_rel = u_vm.u_relativa if u_vm else 0.0
@@ -907,6 +1012,19 @@ elif page.startswith("5"):
             flat = [v for day in lvl.values for v in day]
             if not any(flat):
                 continue
+
+            try:
+                prep_u = U.standard_preparation_uncertainty_at(compound.standard_preparation, nominal)
+            except Exception as e:
+                st.warning(f"No se pudo calcular u de preparación en {label}: {e}")
+                continue
+            with st.expander(f"Detalle de la preparación en {label} ({nominal})"):
+                st.write(f"- u relativa combinada: {prep_u.u_relativa_combinada:.5f}")
+                st.write(f"- u relativa por pureza del MRC: {prep_u.u_relativa_pureza:.5f}")
+                st.write(f"- u relativa por concentración certificada del MRC: {prep_u.u_relativa_certificado_mrc:.5f}")
+                for p, nombre_paso in zip(prep_u.u_relativa_pasos, ["alícuota", "aforo"]):
+                    st.write(f"- {nombre_paso}: u = {p.u_relativa:.5f}  ({p.fuente_calibracion})")
+
             prec = None
             try:
                 prec = S.repeatability_intermediate_precision(lvl.values)
@@ -918,8 +1036,7 @@ elif page.startswith("5"):
             # el MISMO modelo (simple/ponderado) decidido por ISO 8466-1 en la
             # pestaña de curvas — un solo ajuste agrupando todas las curvas,
             # no un ajuste distinto por curva.
-            all_lv_u = [c.levels_nominal for c in compound.calibration_curves if any(c.responses)]
-            all_rs_u = [c.responses for c in compound.calibration_curves if any(c.responses)]
+            all_lv_u, all_rs_u, _, _ = compound.curve_arrays()
             try:
                 cal_u = S.analyze_calibration(all_lv_u, all_rs_u, project.criteria.r_min)
                 res_x = [r / cal_u.slope for r in cal_u.residuales]
