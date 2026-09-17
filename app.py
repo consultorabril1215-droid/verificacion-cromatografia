@@ -229,11 +229,25 @@ if page.startswith("1"):
             )
         with c2:
             project.method.codigo_formato = st.text_input("Código del formato", project.method.codigo_formato)
-            project.method.version = st.text_input("Versión", project.method.version)
+            cv1, cv2 = st.columns(2)
+            with cv1:
+                project.method.version = st.text_input("Versión", project.method.version)
+            with cv2:
+                project.method.fecha = st.date_input("Fecha", project.method.fecha)
             project.method.unidad = st.text_input("Unidad de trabajo", project.method.unidad)
             project.method.laboratorio = st.text_input("Laboratorio", project.method.laboratorio)
             analistas_txt = st.text_input("Analista(s) (separados por coma)", ", ".join(project.method.analistas))
             project.method.analistas = [a.strip() for a in analistas_txt.split(",") if a.strip()]
+
+        st.subheader("Equipos utilizados")
+        st.caption("Instrumentos de medición usados en la verificación — se incluyen en el informe final.")
+        df_equipos_default = pd.DataFrame(
+            project.method.equipos or [{"equipo": "", "marca": "", "codigo_interno": ""}]
+        )
+        df_equipos = st.data_editor(df_equipos_default, num_rows="dynamic", key="equipos_editor",
+                                     column_config={
+                                         "equipo": "Equipo", "marca": "Marca", "codigo_interno": "Código interno",
+                                     })
 
         st.subheader("Estructura del diseño experimental (grupos = día × analista)")
         st.caption(
@@ -302,7 +316,11 @@ if page.startswith("1"):
                 "Nivel de confianza (%)", 50.0, 99.99, project.criteria.confidence_level_percent
             )
 
-        st.form_submit_button("Guardar", type="primary")
+        if st.form_submit_button("Guardar", type="primary"):
+            project.method.equipos = [
+                r for r in df_equipos.to_dict("records") if r.get("equipo")
+            ]
+            st.rerun()
 
     render_design_panel(project.design)
 
@@ -523,7 +541,7 @@ elif page.startswith("3"):
             existing = next((r for r in compound.replicate_levels if r.label == label), None)
             if existing is None:
                 existing = ReplicateLevel(
-                    label=label, nominal=getattr(compound, nominal_attr),
+                    label=label, nominal=getattr(compound, nominal_attr), tipo=label,
                     values=[[0.0] * project.design.replicas_por_grupo for _ in range(project.design.n_grupos)],
                 )
                 compound.replicate_levels.append(existing)
@@ -534,29 +552,59 @@ elif page.startswith("3"):
             df_edit = numeric_data_editor(df, cols_labels, key=f"level_{compound.nombre}_{label}")
             existing.values = df_edit.values.tolist()
 
-    # --- Muestras ---
+    # --- Muestras (control de calidad por lote, Tabla 5 LA-P-343/LA-P-340) ---
     with tabs[2]:
         st.caption(
-            "Muestras de matriz (blanco de matriz, y matriz fortificada) usadas para evaluar precisión "
-            "y veracidad en condiciones reales. Agrega una fila por cada muestra/nivel adicional que "
-            "quieras verificar."
+            "Controles de calidad con muestras reales — Tabla 5 de tu procedimiento (LA-P-343/LA-P-340), "
+            "igual para todas las técnicas. Las muestras nativas NO tienen valor esperado; el subrogado y "
+            "la matriz fortificada sí, pero se evalúan de forma distinta (ver tipo)."
         )
-        sample_labels = [r.label for r in compound.replicate_levels if r.label not in ("LC", "LS")]
-        new_label = st.text_input("Nombre de nueva muestra/nivel (p.ej. 'Matriz SUP + LC')", key=f"newlbl_{compound.nombre}")
-        new_nominal = st.number_input("Valor nominal esperado (0 si es blanco sin adición)", 0.0, key=f"newnom_{compound.nombre}")
-        if st.button("Agregar muestra/nivel", key=f"addlvl_{compound.nombre}") and new_label:
-            compound.replicate_levels.append(
-                ReplicateLevel(
-                    label=new_label, nominal=new_nominal,
-                    values=[[0.0] * project.design.replicas_por_grupo for _ in range(project.design.n_grupos)],
+        TIPOS_MUESTRA = ["Muestra", "MB", "LFB", "Subrogado", "LFM", "LFMD", "DM"]
+        TIPO_AYUDA = {
+            "Muestra": "Resultado nativo de la muestra, sin adición — solo se reporta (no lleva recuperación).",
+            "MB": "Blanco del método — debe dar resultado < LC.",
+            "LFB": "Blanco de laboratorio fortificado (~50% del rango de trabajo) — recuperación simple 70-130%.",
+            "Subrogado": "Estándar subrogado agregado a la muestra en cantidad conocida — recuperación simple 70-130%.",
+            "LFM": "Matriz de laboratorio fortificada — recuperación NETA vs. una muestra nativa de referencia, 70-130%.",
+            "LFMD": "Duplicado de LFM — igual que LFM, más RPD contra el LFM de referencia, ≤30%.",
+            "DM": "Duplicado de una muestra nativa — RPD contra esa muestra de referencia, ≤30%.",
+        }
+        existing_labels = [r.label for r in compound.replicate_levels if r.label not in ("LC", "LS")]
+
+        with st.form(f"addlvl_form_{compound.nombre}"):
+            c1, c2 = st.columns(2)
+            with c1:
+                new_label = st.text_input("Nombre (p.ej. 'Muestra SUP', 'LFM SUP')")
+                new_tipo = st.selectbox("Tipo de control", TIPOS_MUESTRA, format_func=lambda t: f"{t} — {TIPO_AYUDA[t]}"[:60] + "…")
+            with c2:
+                new_nominal = st.number_input(
+                    "Valor esperado / adicionado (deja 0 si es 'Muestra' nativa)", 0.0, format="%.5f"
                 )
-            )
-            st.rerun()
+                ref_options = ["(ninguna)"] + existing_labels
+                new_ref_nativa = st.selectbox("Muestra nativa de referencia (para LFM/LFMD)", ref_options)
+                new_ref_dup = st.selectbox("Referencia para RPD (para DM/LFMD)", ref_options)
+            st.caption(TIPO_AYUDA[new_tipo])
+            if st.form_submit_button("➕ Agregar", type="primary") and new_label:
+                compound.replicate_levels.append(
+                    ReplicateLevel(
+                        label=new_label, nominal=new_nominal, tipo=new_tipo,
+                        referencia_nativa=None if new_ref_nativa == "(ninguna)" else new_ref_nativa,
+                        referencia_duplicado=None if new_ref_dup == "(ninguna)" else new_ref_dup,
+                        values=[[0.0] * project.design.replicas_por_grupo for _ in range(project.design.n_grupos)],
+                    )
+                )
+                st.rerun()
 
         for lvl in compound.replicate_levels:
             if lvl.label in ("LC", "LS"):
                 continue
-            st.markdown(f"**{lvl.label}** (nominal = {lvl.nominal})")
+            refs = []
+            if lvl.referencia_nativa:
+                refs.append(f"nativa: {lvl.referencia_nativa}")
+            if lvl.referencia_duplicado:
+                refs.append(f"RPD vs: {lvl.referencia_duplicado}")
+            refs_txt = f" ({', '.join(refs)})" if refs else ""
+            st.markdown(f"**{lvl.label}** — tipo `{lvl.tipo}`, valor esperado/adicionado = {lvl.nominal}{refs_txt}")
             cols_labels = [f"Rep {j+1}" for j in range(project.design.replicas_por_grupo)]
             df = pd.DataFrame(lvl.values, columns=cols_labels, index=grupo_labels)
             df_edit = numeric_data_editor(df, cols_labels, key=f"sample_{compound.nombre}_{lvl.label}")
@@ -574,78 +622,99 @@ elif page.startswith("3"):
 
     # --- Preparación del estándar (incertidumbre) ---
     with tabs[4]:
-        st.caption(
-            "Desglose de la preparación del patrón usado para este compuesto: material de referencia "
-            "(certificado) + pasos de dilución (pipeteo, aforo). Esto alimenta el módulo de incertidumbre."
-        )
-        cert_options = ["(sin certificado disponible)"] + [
-            f"{c.proveedor} | {c.numero_parte} | {c.numero_lote}" for c in project.certificates
-        ]
-        sel_cert = st.selectbox("Certificado de MRC a usar", cert_options, key=f"selcert_{compound.nombre}")
+        def render_standard_prep_ui(key_prefix: str, nombre_hint: str, default_steps: int = 2) -> StandardPreparation:
+            cert_options = ["(sin certificado disponible)"] + [
+                f"{c.proveedor} | {c.numero_parte} | {c.numero_lote}" for c in project.certificates
+            ]
+            sel_cert = st.selectbox("Certificado de MRC a usar", cert_options, key=f"selcert_{key_prefix}")
 
-        rm = ReferenceMaterialCert(nombre=compound.nombre)
-        if sel_cert != "(sin certificado disponible)":
-            idx = cert_options.index(sel_cert) - 1
-            cert = project.certificates[idx]
-            analito_names = [a.nombre_compuesto for a in cert.analitos]
-            sel_analito = st.selectbox("Analito dentro del certificado", analito_names, key=f"selan_{compound.nombre}")
-            an = next(a for a in cert.analitos if a.nombre_compuesto == sel_analito)
-            rm.certificate_record_id = cert.numero_parte + "|" + cert.numero_lote
-            rm.marca_lote = f"{cert.proveedor} {cert.numero_lote}"
-            rm.concentracion = an.concentracion_real
-            rm.concentracion_unidad = an.unidad
-            rm.tiene_certificado = True
-            rm.incertidumbre_certificado = an.incertidumbre_expandida
-            rm.k_certificado = an.k_certificado
-            rm.pureza_percent = an.pureza_percent
-            rm.incertidumbre_pureza_percent = an.incertidumbre_pureza_percent
-            st.info(
-                f"Concentración: {rm.concentracion} {rm.concentracion_unidad}  |  "
-                f"U: ±{rm.incertidumbre_certificado} (k={rm.k_certificado}"
-                f"{' asumido' if an.k_supuesto else ''})  |  Pureza: {rm.pureza_percent}%"
+            rm = ReferenceMaterialCert(nombre=nombre_hint)
+            if sel_cert != "(sin certificado disponible)":
+                idx = cert_options.index(sel_cert) - 1
+                cert = project.certificates[idx]
+                analito_names = [a.nombre_compuesto for a in cert.analitos]
+                sel_analito = st.selectbox("Analito dentro del certificado", analito_names, key=f"selan_{key_prefix}")
+                an = next(a for a in cert.analitos if a.nombre_compuesto == sel_analito)
+                rm.certificate_record_id = cert.numero_parte + "|" + cert.numero_lote
+                rm.marca_lote = f"{cert.proveedor} {cert.numero_lote}"
+                rm.concentracion = an.concentracion_real
+                rm.concentracion_unidad = an.unidad
+                rm.tiene_certificado = True
+                rm.incertidumbre_certificado = an.incertidumbre_expandida
+                rm.k_certificado = an.k_certificado
+                rm.pureza_percent = an.pureza_percent
+                rm.incertidumbre_pureza_percent = an.incertidumbre_pureza_percent
+                st.info(
+                    f"Concentración: {rm.concentracion} {rm.concentracion_unidad}  |  "
+                    f"U: ±{rm.incertidumbre_certificado} (k={rm.k_certificado}"
+                    f"{' asumido' if an.k_supuesto else ''})  |  Pureza: {rm.pureza_percent}%"
+                )
+            else:
+                st.warning(
+                    "Sin certificado disponible: se aplicará el tratamiento sugerido por la guía QUAM "
+                    "(Apéndice G) usando la mejor estimación disponible como distribución rectangular."
+                )
+                rm.tiene_certificado = False
+                rm.concentracion = st.number_input("Concentración estimada", 0.0, key=f"rmconc_{key_prefix}")
+                rm.incertidumbre_certificado = st.number_input(
+                    "Mejor estimación de U disponible (hoja técnica, etc.)", 0.0, key=f"rmU_{key_prefix}"
+                )
+
+            st.markdown("**Pasos de dilución / preparación**")
+            n_steps = st.number_input("Número de pasos volumétricos", 0, 10, default_steps, key=f"nsteps_{key_prefix}")
+            steps = []
+            for i in range(int(n_steps)):
+                with st.container(border=True):
+                    st.write(f"Paso {i+1}")
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        desc = st.text_input("Descripción", key=f"stepdesc_{key_prefix}_{i}")
+                        vol = st.number_input("Volumen nominal (mL)", 0.0, key=f"stepvol_{key_prefix}_{i}")
+                        instr = st.text_input("Instrumento", key=f"stepinstr_{key_prefix}_{i}")
+                    with c2:
+                        tiene_cal = st.checkbox("Tiene certificado de calibración", key=f"stepcal_{key_prefix}_{i}")
+                        u_cert = st.number_input("U del certificado (mL)", 0.0, key=f"stepUcert_{key_prefix}_{i}") if tiene_cal else None
+                        k_cert = st.number_input("k del certificado", 1.0, 3.0, 2.0, key=f"stepk_{key_prefix}_{i}") if tiene_cal else 2.0
+                        tol = None if tiene_cal else st.number_input(
+                            "Tolerancia de fabricante/clase (mL, semi-intervalo)", 0.0, key=f"steptol_{key_prefix}_{i}"
+                        )
+                    with c3:
+                        sd_rep = st.number_input("SD de repetibilidad (mL, opcional)", 0.0, key=f"stepsd_{key_prefix}_{i}")
+                        incl_temp = st.checkbox("Incluir efecto de temperatura", value=True, key=f"steptemp_{key_prefix}_{i}")
+                        rango_t = st.number_input("Rango de temperatura ±°C", 0.0, 10.0, 3.0, key=f"stepdt_{key_prefix}_{i}")
+                    steps.append(VolumetricStep(
+                        descripcion=desc, volumen_nominal=vol or 1.0, instrumento=instr,
+                        tiene_certificado_calibracion=tiene_cal, incertidumbre_certificado=u_cert, k_certificado=k_cert,
+                        tolerancia_fabricante=tol, sd_repetibilidad=sd_rep or None,
+                        incluir_efecto_temperatura=incl_temp, rango_temperatura=rango_t,
+                    ))
+            return StandardPreparation(reference_material=rm, steps=steps)
+
+        st.caption(
+            "Desglose de la preparación del patrón del analito: material de referencia (certificado) + "
+            "pasos de dilución (pipeteo, aforo). Esto alimenta el módulo de incertidumbre del analito."
+        )
+        default_n = len(compound.standard_preparation.steps) if compound.standard_preparation else 2
+        compound.standard_preparation = render_standard_prep_ui(compound.nombre, compound.nombre, default_n)
+
+        st.divider()
+        st.markdown("### Estándar subrogado (también es un MRC — Tabla 1/2, LA-P-343/LA-P-340)")
+        st.caption(
+            "El subrogado (p.ej. 2-bromo-1-cloropropano) es OTRO material de referencia certificado, que "
+            "se diluye junto con el estándar del analito para la curva y se agrega a cada muestra como "
+            "control de calidad. Se registra aquí por trazabilidad; su incertidumbre NO se combina con la "
+            "del analito objetivo (son solutos independientes) — se guarda para uso futuro si se necesita "
+            "estimar U del subrogado o para dejar constancia auditable del MRC usado."
+        )
+        usa_subrogado = st.checkbox("Este compuesto usa estándar subrogado", value=compound.surrogate_preparation is not None,
+                                     key=f"usasubrog_{compound.nombre}")
+        if usa_subrogado:
+            default_n_sub = len(compound.surrogate_preparation.steps) if compound.surrogate_preparation else 1
+            compound.surrogate_preparation = render_standard_prep_ui(
+                f"{compound.nombre}_subrogado", f"Subrogado ({compound.nombre})", default_n_sub
             )
         else:
-            st.warning(
-                "Sin certificado disponible: se aplicará el tratamiento sugerido por la guía QUAM "
-                "(Apéndice G) usando la mejor estimación disponible como distribución rectangular."
-            )
-            rm.tiene_certificado = False
-            rm.concentracion = st.number_input("Concentración estimada", 0.0, key=f"rmconc_{compound.nombre}")
-            rm.incertidumbre_certificado = st.number_input(
-                "Mejor estimación de U disponible (hoja técnica, etc.)", 0.0, key=f"rmU_{compound.nombre}"
-            )
-
-        st.markdown("**Pasos de dilución / preparación**")
-        n_steps = st.number_input("Número de pasos volumétricos", 0, 10,
-                                   len(compound.standard_preparation.steps) if compound.standard_preparation else 2,
-                                   key=f"nsteps_{compound.nombre}")
-        steps = []
-        for i in range(int(n_steps)):
-            with st.container(border=True):
-                st.write(f"Paso {i+1}")
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    desc = st.text_input("Descripción", key=f"stepdesc_{compound.nombre}_{i}")
-                    vol = st.number_input("Volumen nominal (mL)", 0.0, key=f"stepvol_{compound.nombre}_{i}")
-                    instr = st.text_input("Instrumento", key=f"stepinstr_{compound.nombre}_{i}")
-                with c2:
-                    tiene_cal = st.checkbox("Tiene certificado de calibración", key=f"stepcal_{compound.nombre}_{i}")
-                    u_cert = st.number_input("U del certificado (mL)", 0.0, key=f"stepUcert_{compound.nombre}_{i}") if tiene_cal else None
-                    k_cert = st.number_input("k del certificado", 1.0, 3.0, 2.0, key=f"stepk_{compound.nombre}_{i}") if tiene_cal else 2.0
-                    tol = None if tiene_cal else st.number_input(
-                        "Tolerancia de fabricante/clase (mL, semi-intervalo)", 0.0, key=f"steptol_{compound.nombre}_{i}"
-                    )
-                with c3:
-                    sd_rep = st.number_input("SD de repetibilidad (mL, opcional)", 0.0, key=f"stepsd_{compound.nombre}_{i}")
-                    incl_temp = st.checkbox("Incluir efecto de temperatura", value=True, key=f"steptemp_{compound.nombre}_{i}")
-                    rango_t = st.number_input("Rango de temperatura ±°C", 0.0, 10.0, 3.0, key=f"stepdt_{compound.nombre}_{i}")
-                steps.append(VolumetricStep(
-                    descripcion=desc, volumen_nominal=vol or 1.0, instrumento=instr,
-                    tiene_certificado_calibracion=tiene_cal, incertidumbre_certificado=u_cert, k_certificado=k_cert,
-                    tolerancia_fabricante=tol, sd_repetibilidad=sd_rep or None,
-                    incluir_efecto_temperatura=incl_temp, rango_temperatura=rango_t,
-                ))
-        compound.standard_preparation = StandardPreparation(reference_material=rm, steps=steps)
+            compound.surrogate_preparation = None
 
         st.markdown("**Volumen de muestra en el ensayo de rutina**")
         vm_col1, vm_col2 = st.columns(2)
@@ -705,37 +774,84 @@ elif page.startswith("4"):
                         alert(ok, f"Nivel {lvl}: sin atípicos ({ot.prueba_usada}, n={ot.n})",
                               f"Nivel {lvl}: POSIBLE ATÍPICO ({ot.prueba_usada}, n={ot.n}, crítico={ot.valor_critico})")
 
-        # --- LC / LS / muestras: descriptivos + veracidad + precisión ---
+        # --- LC / LS / controles de calidad por lote (Tabla 5): por tipo ---
+        def _flat(level_label):
+            l = next((r for r in compound.replicate_levels if r.label == level_label), None)
+            if l is None:
+                return None
+            f = [v for day in l.values for v in day]
+            return f if any(f) else None
+
         for lvl in compound.replicate_levels:
-            flat = [v for day in lvl.values for v in day]
-            if not any(flat):
+            flat = _flat(lvl.label)
+            if flat is None:
                 continue
-            st.markdown(f"**{lvl.label}**")
+            st.markdown(f"**{lvl.label}** — tipo `{lvl.tipo}`")
             desc = S.descriptive_stats(flat)
             cols = st.columns(4)
             cols[0].metric("n", desc.n)
             cols[1].metric("Media", f"{desc.mean:.5f}")
             cols[2].metric("SD", f"{desc.sd:.5f}")
             cols[3].metric("CV%", f"{desc.cv_percent:.2f}" if desc.cv_percent is not None else "-")
-            if desc.cv_percent is not None:
-                alert(desc.cv_percent <= crit.cv_max_percent,
-                      f"CV% ({desc.cv_percent:.2f}%) dentro del criterio (≤{crit.cv_max_percent}%)",
-                      f"CV% ({desc.cv_percent:.2f}%) EXCEDE el criterio (≤{crit.cv_max_percent}%)")
 
-            if lvl.nominal:
+            if lvl.tipo in ("LC", "LS", "LFB", "Subrogado") and lvl.nominal:
                 tr = S.trueness_stats(flat, lvl.nominal, crit.t_alpha)
                 cols2 = st.columns(4)
                 cols2[0].metric("Error relativo %", f"{tr.error_rel_percent:.2f}")
                 cols2[1].metric("Recuperación %", f"{tr.recovery_percent:.2f}")
                 cols2[2].metric("t calculado", f"{tr.t_calculado:.3f}")
                 cols2[3].metric("t tabulado", f"{tr.t_tabulado:.3f}")
-                rec_min, rec_max = (crit.recovery_lc_min, crit.recovery_lc_max) if lvl.label == "LC" else (crit.recovery_min, crit.recovery_max)
+                rec_min, rec_max = (crit.recovery_lc_min, crit.recovery_lc_max) if lvl.tipo == "LC" else (crit.recovery_min, crit.recovery_max)
                 ok_rec = rec_min <= tr.recovery_percent <= rec_max
                 alert(ok_rec, f"Recuperación dentro de {rec_min}-{rec_max}%",
                       f"Recuperación FUERA de {rec_min}-{rec_max}%")
                 alert(tr.t_calculado <= tr.t_tabulado,
                       "t calculado ≤ t tabulado: no hay sesgo significativo",
                       "t calculado > t tabulado: SESGO ESTADÍSTICAMENTE SIGNIFICATIVO")
+
+            elif lvl.tipo == "MB":
+                alert(desc.mean < compound.lc_nominal,
+                      f"Blanco del método ({desc.mean:.5f}) < LC ({compound.lc_nominal})",
+                      f"Blanco del método ({desc.mean:.5f}) NO es < LC ({compound.lc_nominal})")
+
+            elif lvl.tipo in ("LFM", "LFMD"):
+                native_flat = _flat(lvl.referencia_nativa) if lvl.referencia_nativa else None
+                if native_flat is None:
+                    st.warning("Falta seleccionar/registrar la muestra nativa de referencia para calcular la recuperación neta.")
+                else:
+                    nr = S.net_recovery_stats(flat, native_flat, lvl.nominal or 1.0)
+                    cols2 = st.columns(3)
+                    cols2[0].metric("Media nativa", f"{nr.mean_native:.5f}")
+                    cols2[1].metric("Media adicionada", f"{nr.mean_spiked:.5f}")
+                    cols2[2].metric("Recuperación neta %", f"{nr.net_recovery_percent:.2f}")
+                    ok_rec = crit.recovery_min <= nr.net_recovery_percent <= crit.recovery_max
+                    alert(ok_rec, f"Recuperación neta dentro de {crit.recovery_min}-{crit.recovery_max}%",
+                          f"Recuperación neta FUERA de {crit.recovery_min}-{crit.recovery_max}%")
+                if lvl.tipo == "LFMD" and lvl.referencia_duplicado:
+                    dup_flat = _flat(lvl.referencia_duplicado)
+                    if dup_flat:
+                        rpd = S.rpd_stats(flat, dup_flat)
+                        alert(rpd.rpd_percent <= crit.rpd_max_percent,
+                              f"RPD ({rpd.rpd_percent:.2f}%) ≤ {crit.rpd_max_percent}%",
+                              f"RPD ({rpd.rpd_percent:.2f}%) EXCEDE {crit.rpd_max_percent}%")
+
+            elif lvl.tipo == "DM":
+                if lvl.referencia_duplicado:
+                    dup_flat = _flat(lvl.referencia_duplicado)
+                    if dup_flat:
+                        rpd = S.rpd_stats(flat, dup_flat)
+                        cols2 = st.columns(1)
+                        cols2[0].metric("RPD %", f"{rpd.rpd_percent:.2f}")
+                        alert(rpd.rpd_percent <= crit.rpd_max_percent,
+                              f"RPD ({rpd.rpd_percent:.2f}%) ≤ {crit.rpd_max_percent}%",
+                              f"RPD ({rpd.rpd_percent:.2f}%) EXCEDE {crit.rpd_max_percent}%")
+                    else:
+                        st.warning("Falta registrar datos en la muestra de referencia para calcular el RPD.")
+                else:
+                    st.warning("Falta seleccionar la muestra de referencia para el duplicado (RPD).")
+
+            elif lvl.tipo == "Muestra":
+                st.caption("Muestra nativa: sin valor esperado, se reporta el resultado tal cual.")
 
             if len(lvl.values) >= 2 and all(len(d) == len(lvl.values[0]) for d in lvl.values):
                 try:
